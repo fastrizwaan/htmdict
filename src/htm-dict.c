@@ -68,8 +68,7 @@ FlatIndex  *htm_dict_get_flat_index(HtmDict *d)  { return d ? d->flat_index : NU
 static char *zip_basename_stem(const char *zip_path) {
     char *base = g_path_get_basename(zip_path);
     char *dot  = strrchr(base, '.');
-    if (dot && (g_ascii_strcasecmp(dot, ".zip")     == 0 ||
-                g_ascii_strcasecmp(dot, ".diction") == 0))
+    if (dot && g_ascii_strcasecmp(dot, ".diction") == 0)
         *dot = '\0';
     return base;
 }
@@ -347,6 +346,12 @@ void htm_dict_close(HtmDict *d) {
 }
 
 HtmDict *htm_dict_open(const char *zip_path, GError **error) {
+    const char *dot = zip_path ? strrchr(zip_path, '.') : NULL;
+    if (!dot || g_ascii_strcasecmp(dot, ".diction") != 0) {
+        g_set_error(error, G_FILE_ERROR, G_FILE_ERROR_INVAL, "only .diction files are supported");
+        return NULL;
+    }
+
     dict_cache_ensure_dir();
 
     HtmDict *d      = g_new0(HtmDict, 1);

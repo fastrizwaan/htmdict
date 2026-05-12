@@ -2,7 +2,7 @@
 
 #include <glib.h>
 
-/* Same layout as diction: $XDG_CACHE_HOME/diction/dicts/<sha1-of-path> */
+/* Cache layout: $XDG_CACHE_HOME/htmdict/dicts/<sha1-of-path> */
 
 const char *dict_cache_base_dir(void);
 char *dict_cache_dir_path(void);

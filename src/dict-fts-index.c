@@ -1,7 +1,7 @@
 /*
  * dict-fts-index.c — persistent SQLite FTS5 full-text search index.
  *
- * Index lives at:  ~/.cache/diction/fts/<sha1-of-dict-path>.sqlite
+ * Index lives at:  ~/.cache/htmdict/fts/<sha1-of-dict-path>.sqlite
  * Schema: one contentless FTS5 virtual table; rowid == flat-index entry_id.
  *
  * SQLite is configured for minimal RAM use:
@@ -43,7 +43,7 @@ char* dict_fts_sqlite_path_for(const char *dict_path)
     char *hash = g_compute_checksum_for_string(G_CHECKSUM_SHA1, dict_path, -1);
     const char *base = dict_cache_base_dir();
     char *fname = g_strdup_printf("%s.sqlite", hash);
-    char *path  = g_build_filename(base, "diction", "fts", fname, NULL);
+    char *path  = g_build_filename(base, "htmdict", "fts", fname, NULL);
     g_free(fname);
     g_free(hash);
     return path;
@@ -112,7 +112,7 @@ DictFtsBuilder* dict_fts_builder_new(const char *dict_path, GError **err)
 {
     /* Ensure cache directory exists */
     const char *base = dict_cache_base_dir();
-    char *fts_dir = g_build_filename(base, "diction", "fts", NULL);
+    char *fts_dir = g_build_filename(base, "htmdict", "fts", NULL);
     g_mkdir_with_parents(fts_dir, 0755);
     g_free(fts_dir);
 

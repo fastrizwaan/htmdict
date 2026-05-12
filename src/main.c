@@ -25,6 +25,7 @@ typedef struct {
     gboolean         fts_enabled;
     AdwStyleManager *style_mgr;
     gboolean         is_dark;
+    char            *last_loaded_word;
     GtkWidget       *progress_dialog;
     GtkProgressBar  *progress_bar;
     GtkLabel        *progress_label;
@@ -138,14 +139,71 @@ static gboolean current_is_dark(AppState *app) {
     return adw_style_manager_get_dark(app->style_mgr);
 }
 
+/* ── config helpers ───────────────────────────────────────────── */
+static char *app_config_dir_path(void) {
+    return g_build_filename(g_get_user_config_dir(), "htmdict", NULL);
+}
+
+static char *app_config_file_path(void) {
+    char *dir = app_config_dir_path();
+    char *path = g_build_filename(dir, "config.ini", NULL);
+    g_free(dir);
+    return path;
+}
+
+static void load_config(AppState *app) {
+    char *path = app_config_file_path();
+    GKeyFile *kf = g_key_file_new();
+    GError *err = NULL;
+
+    if (g_key_file_load_from_file(kf, path, G_KEY_FILE_NONE, &err)) {
+        char *scheme = g_key_file_get_string(kf, "ui", "color-scheme", NULL);
+        if (g_strcmp0(scheme, "dark") == 0)
+            adw_style_manager_set_color_scheme(app->style_mgr, ADW_COLOR_SCHEME_PREFER_DARK);
+        else if (g_strcmp0(scheme, "light") == 0)
+            adw_style_manager_set_color_scheme(app->style_mgr, ADW_COLOR_SCHEME_PREFER_LIGHT);
+        app->fts_enabled = g_key_file_get_boolean(kf, "search", "fts-enabled", NULL);
+        g_free(scheme);
+    } else {
+        g_clear_error(&err);
+    }
+
+    g_key_file_unref(kf);
+    g_free(path);
+}
+
+static void save_config(AppState *app) {
+    char *dir = app_config_dir_path();
+    if (g_mkdir_with_parents(dir, 0755) != 0) {
+        g_free(dir);
+        return;
+    }
+
+    GKeyFile *kf = g_key_file_new();
+    g_key_file_set_string(kf, "ui", "color-scheme", current_is_dark(app) ? "dark" : "light");
+    g_key_file_set_boolean(kf, "search", "fts-enabled", app->fts_enabled);
+
+    gsize len = 0;
+    char *data = g_key_file_to_data(kf, &len, NULL);
+    char *path = g_build_filename(dir, "config.ini", NULL);
+    g_file_set_contents(path, data, len, NULL);
+
+    g_free(path);
+    g_free(data);
+    g_key_file_unref(kf);
+    g_free(dir);
+}
+
 static const char *theme_css(gboolean dark) {
     if (dark) {
-        return "body { background-color: #1e1e1e !important; color: #e0e0e0 !important; font-family: sans-serif; padding: 20px; line-height: 1.6; } "
+        return "html, body { background: #1e1e1e !important; color: #e0e0e0 !important; } "
+               "body { font-family: sans-serif; padding: 20px; line-height: 1.6; color-scheme: dark; } "
                "a { color: #8ab4f8 !important; } "
-               "font[color], span[style*='color'] { color: inherit !important; } "
-               "* :not(a) { background-color: transparent !important; }";
+               "font[color], span[style*='color'], div[style*='color'], p[style*='color'] { color: inherit !important; } "
+               "*:not(img):not(svg):not(canvas):not(video) { background-color: transparent !important; }";
     } else {
-        return "body { background-color: #fafafa !important; color: #1a1a1a !important; font-family: sans-serif; padding: 20px; line-height: 1.6; } "
+        return "html, body { background: #fafafa !important; color: #1a1a1a !important; } "
+               "body { font-family: sans-serif; padding: 20px; line-height: 1.6; color-scheme: light; } "
                "a { color: #0066cc !important; }";
     }
 }
@@ -168,8 +226,10 @@ static void inject_theme(AppState *app) {
     char *escaped_css = g_strescape(css, NULL);
     char *js = g_strdup_printf(
         "(function(){"
+        "var parent=document.head||document.documentElement;"
+        "if(!parent)return;"
         "var s=document.getElementById('__htmdict_theme');"
-        "if(!s){s=document.createElement('style');s.id='__htmdict_theme';document.head.appendChild(s);}"
+        "if(!s){s=document.createElement('style');s.id='__htmdict_theme';parent.appendChild(s);}"
         "s.textContent=\"%s\";"
         "})()", escaped_css);
     webkit_web_view_evaluate_javascript(app->webview, js, -1, NULL, NULL, NULL, NULL, NULL);
@@ -185,6 +245,7 @@ static void on_dark_changed(AdwStyleManager *mgr, GParamSpec *ps, gpointer ud) {
             app->is_dark ? "display-brightness-symbolic" : "night-light-symbolic");
     }
     inject_theme(app);
+    save_config(app);
 }
 
 static void on_theme_toggled(GtkButton *btn, gpointer ud) {
@@ -249,11 +310,39 @@ static void load_word(AppState *app, const char *word) {
     HtmDict *d = app_active_dict(app);
     if (!d || !word) return;
     char *norm = normalize_for_search(word);
+    if (app->last_loaded_word && norm && g_strcmp0(app->last_loaded_word, norm) == 0) {
+        g_free(norm);
+        return;
+    }
     char *html = htm_dict_get_definition_html(d, norm ? norm : word);
     char *page = build_page(app, html && html[0] ? html : "<p><i>No entry.</i></p>");
     char *base = g_strdup_printf("htmdict:///%s/%s", htm_dict_id(d), htm_dict_resource_prefix(d));
     webkit_web_view_load_html(app->webview, page, base);
+    g_free(app->last_loaded_word);
+    app->last_loaded_word = g_strdup(norm ? norm : word);
     g_free(page); g_free(base); g_free(html); g_free(norm);
+}
+
+static void load_exact_match_if_any(AppState *app) {
+    HtmDict *d = app_active_dict(app);
+    FlatIndex *fi = d ? htm_dict_get_flat_index(d) : NULL;
+    if (!fi || flat_index_count(fi) == 0) return;
+
+    const char *raw_q = gtk_editable_get_text(GTK_EDITABLE(app->search));
+    char *q = normalize_for_search(raw_q);
+    if (!q || !q[0]) {
+        g_clear_pointer(&app->last_loaded_word, g_free);
+        g_free(q);
+        return;
+    }
+
+    size_t pos = flat_index_search(fi, q);
+    if (pos != (size_t)-1) {
+        const FlatTreeEntry *entry = flat_index_get(fi, pos);
+        if (entry && flat_index_entry_matches_query(fi->mmap_data, entry, q, strlen(q)))
+            load_word(app, q);
+    }
+    g_free(q);
 }
 
 /* ── URI scheme handler ────────────────────────────────────────── */
@@ -450,7 +539,12 @@ static void rebuild_list(AppState *app) {
     }
 }
 
-static void on_search_changed(GtkSearchEntry *e, gpointer ud) { (void)e; rebuild_list(ud); }
+static void on_search_changed(GtkSearchEntry *e, gpointer ud) {
+    (void)e;
+    AppState *app = ud;
+    rebuild_list(app);
+    load_exact_match_if_any(app);
+}
 
 static void on_row_activated(GtkListBox *box, GtkListBoxRow *row, gpointer ud) {
     (void)box;
@@ -465,9 +559,11 @@ static void on_dict_selected(GObject *obj, GParamSpec *pspec, gpointer ud) {
     guint     pos = gtk_drop_down_get_selected(app->dict_dropdown);
     if (pos >= app->dicts->len) return;
     app->current = pos;
+    g_clear_pointer(&app->last_loaded_word, g_free);
     GtkRoot *root = gtk_widget_get_root(GTK_WIDGET(app->webview));
     gtk_window_set_title(GTK_WINDOW(root), htm_dict_display_name(app_active_dict(app)));
     rebuild_list(app);
+    load_exact_match_if_any(app);
 }
 
 /* ── settings menu ─────────────────────────────────────────────── */
@@ -476,6 +572,7 @@ static void on_fts_toggle(GObject *btn, GParamSpec *ps, gpointer ud) {
     AppState *app      = ud;
     app->fts_enabled   = gtk_check_button_get_active(GTK_CHECK_BUTTON(btn));
     rebuild_list(app);
+    save_config(app);
 }
 
 static GtkWidget *build_settings_popover(AppState *app) {
@@ -511,7 +608,7 @@ static gboolean filename_is_dict_archive(const char *name) {
     if (!name) return FALSE;
     const char *dot = strrchr(name, '.');
     if (!dot) return FALSE;
-    return g_ascii_strcasecmp(dot, ".zip") == 0 || g_ascii_strcasecmp(dot, ".diction") == 0;
+    return g_ascii_strcasecmp(dot, ".diction") == 0;
 }
 
 static void discover_dict_archives(const char *dir, GPtrArray *out) {
@@ -550,6 +647,7 @@ static void app_activate(GtkApplication *gtk_app, gpointer ud) {
     app->filter_indices   = g_array_new(FALSE, FALSE, sizeof(size_t));
     app->fts_enabled      = FALSE;
     app->style_mgr        = adw_style_manager_get_default();
+    load_config(app);
     app->is_dark          = adw_style_manager_get_dark(app->style_mgr);
 
     GPtrArray *paths = g_ptr_array_new_with_free_func(g_free);
@@ -557,11 +655,9 @@ static void app_activate(GtkApplication *gtk_app, gpointer ud) {
         for (guint i = 0; i < cli_paths->len; i++)
             g_ptr_array_add(paths, g_strdup(g_ptr_array_index(cli_paths, i)));
     } else {
-        char *d1 = g_build_filename(g_get_user_data_dir(), "htmdict", NULL);
-        char *d2 = g_build_filename(g_get_home_dir(), ".local", "share", "htmdict", NULL);
+        char *d1 = app_config_dir_path();
         discover_dict_archives(d1, paths);
-        discover_dict_archives(d2, paths);
-        g_free(d1); g_free(d2);
+        g_free(d1);
         discover_dict_archives(".", paths);
     }
 
@@ -659,6 +755,7 @@ static void app_activate(GtkApplication *gtk_app, gpointer ud) {
         g_free(blank);
     }
     g_signal_connect(app->webview, "decide-policy", G_CALLBACK(policy_decide_cb), app);
+    inject_theme(app);
 
     /* Watch theme changes — inject CSS, no reload */
     g_signal_connect(app->style_mgr, "notify::dark", G_CALLBACK(on_dark_changed), app);
@@ -692,6 +789,7 @@ static void app_state_free(gpointer p) {
     if (!app) return;
     g_ptr_array_unref(app->dicts);
     g_array_unref(app->filter_indices);
+    g_free(app->last_loaded_word);
     g_free(app);
 }
 

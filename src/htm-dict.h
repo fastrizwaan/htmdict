@@ -15,7 +15,7 @@ const char *htm_dict_contents_lang(HtmDict *d);
 /* Directory prefix inside zip for resources, e.g. "CALD4/" — includes trailing slash. */
 const char *htm_dict_resource_prefix(HtmDict *d);
 
-/* Open dictionary from a ZIP container (.zip or .diction — same format, renamed). */
+/* Open a .diction dictionary container. Internally it uses the ZIP file format. */
 HtmDict *htm_dict_open(const char *zip_path, GError **error);
 void htm_dict_close(HtmDict *d);
 

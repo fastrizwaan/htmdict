@@ -7,7 +7,7 @@
 /* ---------- Path helpers ---------- */
 
 /* Returns the SQLite DB path for the given dictionary source path.
- * Stored at ~/.cache/diction/fts/<sha1>.sqlite  (caller frees). */
+ * Stored at ~/.cache/htmdict/fts/<sha1>.sqlite  (caller frees). */
 char* dict_fts_sqlite_path_for(const char *dict_path);
 
 /* Returns TRUE if a valid FTS index exists on disk. */

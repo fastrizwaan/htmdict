@@ -196,11 +196,11 @@ static void save_config(AppState *app) {
 
 static const char *theme_css(gboolean dark) {
     if (dark) {
-        return "html, body { background: #1e1e1e !important; color: #e0e0e0 !important; } "
+        return "html, body { background-color: #1e1e1e !important; color: #e0e0e0 !important; } "
                "body { font-family: sans-serif; padding: 20px; line-height: 1.6; color-scheme: dark; } "
                "a { color: #8ab4f8 !important; } "
                "font[color], span[style*='color'], div[style*='color'], p[style*='color'] { color: inherit !important; } "
-               "*:not(img):not(svg):not(canvas):not(video) { background-color: transparent !important; }";
+               "*:not(html):not(body):not(img):not(svg):not(canvas):not(video) { background-color: transparent !important; }";
     } else {
         return "html, body { background: #fafafa !important; color: #1a1a1a !important; } "
                "body { font-family: sans-serif; padding: 20px; line-height: 1.6; color-scheme: light; } "
@@ -242,17 +242,23 @@ static void on_dark_changed(AdwStyleManager *mgr, GParamSpec *ps, gpointer ud) {
     app->is_dark  = current_is_dark(app);
     if (app->theme_toggle) {
         gtk_button_set_icon_name(app->theme_toggle,
-            app->is_dark ? "display-brightness-symbolic" : "night-light-symbolic");
+            app->is_dark ? "weather-clear-symbolic" : "weather-clear-night-symbolic");
     }
     inject_theme(app);
+    
+    GdkRGBA bg;
+    if (app->is_dark) gdk_rgba_parse(&bg, "#1e1e1e");
+    else              gdk_rgba_parse(&bg, "#fafafa");
+    webkit_web_view_set_background_color(app->webview, &bg);
+
     save_config(app);
 }
 
 static void on_theme_toggled(GtkButton *btn, gpointer ud) {
     (void)btn;
     AppState *app = ud;
-    AdwColorScheme cs = adw_style_manager_get_color_scheme(app->style_mgr);
-    if (cs == ADW_COLOR_SCHEME_PREFER_DARK) {
+    
+    if (current_is_dark(app)) {
         adw_style_manager_set_color_scheme(app->style_mgr, ADW_COLOR_SCHEME_PREFER_LIGHT);
     } else {
         adw_style_manager_set_color_scheme(app->style_mgr, ADW_COLOR_SCHEME_PREFER_DARK);
@@ -655,9 +661,15 @@ static void app_activate(GtkApplication *gtk_app, gpointer ud) {
         for (guint i = 0; i < cli_paths->len; i++)
             g_ptr_array_add(paths, g_strdup(g_ptr_array_index(cli_paths, i)));
     } else {
+        /* 1. ~/.config/htmdict */
         char *d1 = app_config_dir_path();
         discover_dict_archives(d1, paths);
         g_free(d1);
+        /* 2. ~/.local/share/htmdict  (XDG user data dir) */
+        char *d2 = g_build_filename(g_get_user_data_dir(), "htmdict", NULL);
+        discover_dict_archives(d2, paths);
+        g_free(d2);
+        /* 3. Current working directory */
         discover_dict_archives(".", paths);
     }
 
@@ -713,7 +725,7 @@ static void app_activate(GtkApplication *gtk_app, gpointer ud) {
 
     /* Settings menu button (end) */
     app->theme_toggle = GTK_BUTTON(gtk_button_new_from_icon_name(
-        app->is_dark ? "display-brightness-symbolic" : "night-light-symbolic"));
+        app->is_dark ? "weather-clear-symbolic" : "weather-clear-night-symbolic"));
     g_signal_connect(app->theme_toggle, "clicked", G_CALLBACK(on_theme_toggled), app);
     adw_header_bar_pack_end(hb, GTK_WIDGET(app->theme_toggle));
 
@@ -754,6 +766,13 @@ static void app_activate(GtkApplication *gtk_app, gpointer ud) {
         webkit_web_view_load_html(app->webview, blank, "about:blank");
         g_free(blank);
     }
+    
+    /* Ensure WebView background is consistent with theme */
+    GdkRGBA bg;
+    if (app->is_dark) gdk_rgba_parse(&bg, "#1e1e1e");
+    else              gdk_rgba_parse(&bg, "#fafafa");
+    webkit_web_view_set_background_color(app->webview, &bg);
+
     g_signal_connect(app->webview, "decide-policy", G_CALLBACK(policy_decide_cb), app);
     inject_theme(app);
 
@@ -797,8 +816,8 @@ int main(int argc, char **argv) {
     (void)argv;
     adw_init();
     GtkApplication *app = gtk_application_new("io.github.fastrizwaan.htmdict",
-                                              G_APPLICATION_HANDLES_COMMAND_LINE);
+                                               G_APPLICATION_HANDLES_COMMAND_LINE);
     g_signal_connect(app, "command-line", G_CALLBACK(app_command_line), NULL);
-    g_signal_connect(app, "activate",     G_CALLBACK(app_activate),     NULL);
+    g_signal_connect(app, "activate", G_CALLBACK(app_activate), NULL);
     return g_application_run(G_APPLICATION(app), argc, argv);
 }

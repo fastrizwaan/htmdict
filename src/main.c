@@ -300,7 +300,7 @@ static char *build_page(AppState *app, const char *body_html) {
     HtmDict    *d    = app_active_dict(app);
     const char *pfx  = d ? htm_dict_resource_prefix(d) : "";
     const char *id   = d ? htm_dict_id(d)               : "00000000";
-    char *base = g_strdup_printf("htmdict:///%s/%s", id, pfx);
+    char *base = g_strdup_printf("htmdict://%s/%s", id, pfx);
     char *css  = g_strdup(theme_css(current_is_dark(app)));
     char *page = g_strdup_printf(
         "<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
@@ -322,7 +322,7 @@ static void load_word(AppState *app, const char *word) {
     }
     char *html = htm_dict_get_definition_html(d, norm ? norm : word);
     char *page = build_page(app, html && html[0] ? html : "<p><i>No entry.</i></p>");
-    char *base = g_strdup_printf("htmdict:///%s/%s", htm_dict_id(d), htm_dict_resource_prefix(d));
+    char *base = g_strdup_printf("htmdict://%s/%s", htm_dict_id(d), htm_dict_resource_prefix(d));
     webkit_web_view_load_html(app->webview, page, base);
     g_free(app->last_loaded_word);
     app->last_loaded_word = g_strdup(norm ? norm : word);
@@ -356,32 +356,51 @@ static void scheme_request_cb(WebKitURISchemeRequest *request, gpointer user_dat
     AppState   *app = user_data;
     const char *uri = webkit_uri_scheme_request_get_uri(request);
     GUri *gu = g_uri_parse(uri, G_URI_FLAGS_NONE, NULL);
-    if (!gu) { webkit_uri_scheme_request_finish_error(request,
-        g_error_new_literal(G_IO_ERROR, G_IO_ERROR_FAILED, "bad URI")); return; }
+    if (!gu) {
+        webkit_uri_scheme_request_finish_error(request, g_error_new_literal(G_IO_ERROR, G_IO_ERROR_FAILED, "bad URI"));
+        return;
+    }
+
+    const char *host = g_uri_get_host(gu);
     const char *path = g_uri_get_path(gu);
-    if (!path || path[0] != '/' || strlen(path) < 10) {
-        g_uri_unref(gu); webkit_uri_scheme_request_finish_error(request,
-            g_error_new_literal(G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT, "bad path")); return; }
-    const char *p = path + 1;
-    char idbuf[9]; memcpy(idbuf, p, 8); idbuf[8] = '\0';
-    for (int i = 0; i < 8; i++) {
-        if (!g_ascii_isxdigit(idbuf[i])) { g_uri_unref(gu);
-            webkit_uri_scheme_request_finish_error(request,
-                g_error_new_literal(G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT, "bad id")); return; } }
-    if (p[8] != '/') { g_uri_unref(gu);
-        webkit_uri_scheme_request_finish_error(request,
-            g_error_new_literal(G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT, "bad path")); return; }
-    const char *rel = p + 9;
     HtmDict *found = NULL;
-    for (guint i = 0; i < app->dicts->len; i++) {
-        HtmDict *d = g_ptr_array_index(app->dicts, i);
-        if (strcmp(htm_dict_id(d), idbuf) == 0) { found = d; break; } }
-    if (!found) { g_uri_unref(gu);
-        webkit_uri_scheme_request_finish_error(request,
-            g_error_new_literal(G_IO_ERROR, G_IO_ERROR_NOT_FOUND, "unknown dictionary")); return; }
+    const char *rel = NULL;
+
+    if (host && strlen(host) == 8) {
+        /* New style: htmdict://id/path */
+        for (guint i = 0; i < app->dicts->len; i++) {
+            HtmDict *d = g_ptr_array_index(app->dicts, i);
+            if (strcmp(htm_dict_id(d), host) == 0) {
+                found = d;
+                break;
+            }
+        }
+        rel = (path && path[0] == '/') ? path + 1 : path;
+    } else {
+        /* Old style: htmdict:///id/path */
+        if (path && path[0] == '/' && strlen(path) >= 10) {
+            char idbuf[9]; memcpy(idbuf, path + 1, 8); idbuf[8] = '\0';
+            for (guint i = 0; i < app->dicts->len; i++) {
+                HtmDict *d = g_ptr_array_index(app->dicts, i);
+                if (strcmp(htm_dict_id(d), idbuf) == 0) {
+                    found = d;
+                    break;
+                }
+            }
+            rel = path + 10;
+        }
+    }
+
+    if (!found || !rel || !*rel) {
+        g_uri_unref(gu);
+        webkit_uri_scheme_request_finish_error(request, g_error_new_literal(G_IO_ERROR, G_IO_ERROR_NOT_FOUND, "not found"));
+        return;
+    }
+
     GError *err = NULL; GBytes *gb = NULL; char *mime = NULL;
     if (!htm_dict_read_resource_bytes(found, rel, &gb, &mime, &err)) {
-        g_uri_unref(gu); webkit_uri_scheme_request_finish_error(request, err); return; }
+        g_uri_unref(gu); webkit_uri_scheme_request_finish_error(request, err); return;
+    }
     g_uri_unref(gu);
     gsize len = g_bytes_get_size(gb);
     GInputStream *in = g_memory_input_stream_new_from_bytes(gb);

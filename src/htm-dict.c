@@ -218,6 +218,53 @@ static void tmp_entry_free(gpointer p) {
     g_free(e);
 }
 
+static void htm_resolve_links(GPtrArray *tmps, const uint8_t *buf, size_t size) {
+    (void)size;
+    if (tmps->len == 0) return;
+
+    GHashTable *lookup = g_hash_table_new(g_str_hash, g_str_equal);
+    for (guint i = 0; i < tmps->len; i++) {
+        TmpEntry *te = g_ptr_array_index(tmps, i);
+        if (!g_hash_table_contains(lookup, te->word)) {
+            g_hash_table_insert(lookup, te->word, te);
+        }
+    }
+
+    int resolved_count = 0;
+    for (guint i = 0; i < tmps->len; i++) {
+        TmpEntry *te = g_ptr_array_index(tmps, i);
+        if (te->len >= 8 && strncmp((const char *)(buf + te->off), "@@@LINK=", 8) == 0) {
+            char *link_content = g_strndup((const char *)(buf + te->off + 8), te->len - 8);
+            char *target_word = g_strstrip(link_content);
+            TmpEntry *target = g_hash_table_lookup(lookup, target_word);
+            int depth = 0;
+            while (target && depth < 20) {
+                if (target->len >= 8 && strncmp((const char *)(buf + target->off), "@@@LINK=", 8) == 0) {
+                    char *next_link = g_strndup((const char *)(buf + target->off + 8), target->len - 8);
+                    char *next_target_word = g_strstrip(next_link);
+                    TmpEntry *next_target = g_hash_table_lookup(lookup, next_target_word);
+                    g_free(next_link);
+                    if (!next_target || next_target == target) break;
+                    target = next_target;
+                    depth++;
+                } else {
+                    break;
+                }
+            }
+            if (target && target != te) {
+                te->off = target->off;
+                te->len = target->len;
+                resolved_count++;
+            }
+            g_free(link_content);
+        }
+    }
+    if (resolved_count > 0) {
+        g_message("Resolved %d dictionary links (@@@LINK=)", resolved_count);
+    }
+    g_hash_table_destroy(lookup);
+}
+
 static gboolean htm_build_index(HtmDict *d, const uint8_t *buf, size_t size, GError **error) {
     ScanState  state        = S_META;
     char      *current_word = NULL;
@@ -274,6 +321,9 @@ static gboolean htm_build_index(HtmDict *d, const uint8_t *buf, size_t size, GEr
         g_set_error(error, G_FILE_ERROR, G_FILE_ERROR_FAILED, "no entries found in HTML");
         return FALSE;
     }
+
+    /* Resolve @@@LINK= entries */
+    htm_resolve_links(tmps, buf, size);
 
     /* Sort entries alphabetically */
     g_ptr_array_sort(tmps, cmp_tmp_entry);

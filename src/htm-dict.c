@@ -374,19 +374,22 @@ static gboolean htm_build_index(HtmDict *d, const uint8_t *buf, size_t size, GEr
     GPtrArray *tmps = g_ptr_array_new_with_free_func(tmp_entry_free);
 
     while (pos < size) {
+        const char *p = (const char *)(buf + pos);
+        size_t rem = size - pos;
+
         if (state == S_META) {
-            /* Look for <article id="... */
-            const char *p = (const char *)(buf + pos);
-            const char *start = strstr(p, "<article");
+            const char *start = memmem(p, rem, "<article", 8);
             if (!start) break;
             
-            const char *id_attr = strstr(start, "id=\"");
+            const char *id_attr = memmem(start, size - (size_t)(start - (const char *)buf), "id=\"", 4);
             if (!id_attr) {
                 pos = (size_t)(start - (const char *)buf) + 8;
                 continue;
             }
             id_attr += 4;
-            const char *id_end = strchr(id_attr, '"');
+            const char *rem_p = id_attr;
+            size_t rem_len = size - (size_t)(rem_p - (const char *)buf);
+            const char *id_end = memchr(rem_p, '"', rem_len);
             if (!id_end) {
                 pos = (size_t)(id_attr - (const char *)buf);
                 continue;
@@ -395,22 +398,19 @@ static gboolean htm_build_index(HtmDict *d, const uint8_t *buf, size_t size, GEr
             g_free(current_word);
             current_word = g_strndup(id_attr, (gsize)(id_end - id_attr));
             
-            /* Move pos past the opening <article ... > */
-            const char *tag_end = strchr(id_end, '>');
+            const char *tag_end = memchr(id_end, '>', size - (size_t)(id_end - (const char *)buf));
             if (!tag_end) {
                 pos = (size_t)(id_end - (const char *)buf);
                 continue;
             }
-            html_start = (guint64)(start - (const char *)buf); /* Start including the tag */
+            html_start = (guint64)(start - (const char *)buf);
             state = S_HTML;
             pos = (size_t)(tag_end + 1 - (const char *)buf);
         } else {
-            /* Look for </article> */
-            const char *p = (const char *)(buf + pos);
-            const char *end = strstr(p, "</article>");
+            const char *end = memmem(p, rem, "</article>", 10);
             if (!end) break;
             
-            guint64 html_end = (guint64)(end + 10 - (const char *)buf); /* Include </article> */
+            guint64 html_end = (guint64)(end + 10 - (const char *)buf);
             
             if (current_word) {
                 TmpEntry *e = g_new(TmpEntry, 1);
@@ -427,7 +427,7 @@ static gboolean htm_build_index(HtmDict *d, const uint8_t *buf, size_t size, GEr
 
     if (tmps->len == 0) {
         g_ptr_array_unref(tmps);
-        g_set_error(error, G_FILE_ERROR, G_FILE_ERROR_FAILED, "no entries found in HTML");
+        g_set_error(error, G_FILE_ERROR, G_FILE_ERROR_FAILED, "no entries found in HTML (size=%zu)", size);
         return FALSE;
     }
 

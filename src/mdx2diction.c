@@ -149,7 +149,9 @@ int main(int argc, char *argv[]) {
             if (out) {
                 ExtractContext ctx = { .out = out };
                 fprintf(stderr, "Extracting entries from %s...\n", mdx_path);
-                mdict_reader_iterate(r, mdx_entry_callback, &ctx, &err);
+                if (!mdict_reader_iterate(r, mdx_entry_callback, &ctx, &err)) {
+                    fprintf(stderr, "Error during MDX iteration: %s\n", err ? err->message : "Unknown error");
+                }
                 fclose(out);
                 
                 /* Generate meta.json */

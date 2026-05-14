@@ -514,7 +514,7 @@ static gboolean populate_list_idle(gpointer data) {
     }
 
     size_t count = app->filter_indices->len;
-    size_t chunk_size = 200;
+    size_t chunk_size = 50;
     size_t end = app->list_populate_offset + chunk_size;
     if (end > count) end = count;
 
@@ -580,15 +580,15 @@ static void rebuild_list(AppState *app) {
     }
 
     if (!fts_hit) {
-        /* Prefix/substring search via FlatIndex */
         size_t total = flat_index_count(fi);
         if (!q || !q[0]) {
-            /* No query — show all (streamed) */
-            for (size_t i = 0; i < total; i++) {
+            /* No query — show first 2000 entries only for snappy performance */
+            size_t show_count = (total > 2000) ? 2000 : total;
+            for (size_t i = 0; i < show_count; i++) {
                 g_array_append_val(app->filter_indices, i);
             }
         } else {
-            /* Try prefix search first */
+            /* 1. Try prefix search first (extremely fast) */
             size_t start = flat_index_search_prefix(fi, q);
             if (start != (size_t)-1) {
                 for (size_t i = start; i < total; i++) {
@@ -596,43 +596,42 @@ static void rebuild_list(AppState *app) {
                     if (!flat_index_entry_matches_prefix(fi->mmap_data, e, q, strlen(q)))
                         break;
                     g_array_append_val(app->filter_indices, i);
+                    /* Cap prefix results for UI stability */
+                    if (app->filter_indices->len >= 1000) break;
                 }
             }
             
-            /* case-insensitive substring scan */
-            char *nd = g_utf8_strdown(q, -1);
-            for (size_t i = 0; i < total; i++) {
-                /* Avoid duplicates if prefix search already caught it */
-                if (start != (size_t)-1) {
-                   /* Simple optimization: if i is in the prefix range, skip */
-                }
-                
-                /* Simple check: if prefix range is [start, some_end), we check if i is in it.
-                   But for simplicity, let's just use a hash table for duplicates if query is long, 
-                   or just clear the array and redo. */
-                
-                const FlatTreeEntry *e = flat_index_get(fi, i);
-                if (!e) continue;
-                const char *hw  = fi->mmap_data + e->h_off;
-                char       *hwl = g_utf8_strdown(hw, (gssize)e->h_len);
-                if (strstr(hwl, nd)) {
-                    /* Check if already added via prefix */
-                    gboolean already = FALSE;
-                    if (start != (size_t)-1) {
-                        for (guint j = 0; j < app->filter_indices->len; j++) {
-                            if (g_array_index(app->filter_indices, size_t, j) == i) {
-                                already = TRUE; break;
+            /* 2. Limited substring scan ONLY if we have few prefix matches and query is at least 3 chars */
+            if (app->filter_indices->len < 200 && strlen(q) >= 3) {
+                char *nd = g_utf8_strdown(q, -1);
+                for (size_t i = 0; i < total; i++) {
+                    if (app->filter_indices->len >= 500) break;
+                    
+                    const FlatTreeEntry *e = flat_index_get(fi, i);
+                    if (e->h_len < strlen(q)) continue;
+
+                    /* Heuristic: if we already found this via prefix, skip (crude check) */
+                    /* (Wait, we can't easily check 'already' without a hash table or loop, 
+                       so we just let it be for now or use a small loop) */
+                    
+                    const char *hw  = fi->mmap_data + e->h_off;
+                    char       *hwl = g_utf8_strdown(hw, (gssize)e->h_len);
+                    if (strstr(hwl, nd)) {
+                        /* Deduplicate prefix matches */
+                        gboolean already = FALSE;
+                        if (start != (size_t)-1) {
+                            for (guint j = 0; j < app->filter_indices->len; j++) {
+                                if (g_array_index(app->filter_indices, size_t, j) == i) {
+                                    already = TRUE; break;
+                                }
                             }
                         }
+                        if (!already) g_array_append_val(app->filter_indices, i);
                     }
-                    if (!already) g_array_append_val(app->filter_indices, i);
+                    g_free(hwl);
                 }
-                g_free(hwl);
-                
-                /* Cap search results at 5000 for sanity */
-                if (app->filter_indices->len >= 5000) break;
+                g_free(nd);
             }
-            g_free(nd);
         }
     }
     g_free(q);
@@ -798,11 +797,8 @@ static void app_activate(GtkApplication *gtk_app, gpointer ud) {
         gtk_window_present(GTK_WINDOW(app->progress_dialog));
     } else {
         g_ptr_array_unref(paths);
-        g_warning("No dictionaries found.");
+        g_warning("No dictionaries found in common search paths.");
     }
-
-    if (app->dicts->len == 0)
-        g_warning("No dictionaries found.");
 
     GtkStringList *strs = gtk_string_list_new(NULL);
     for (guint i = 0; i < app->dicts->len; i++)

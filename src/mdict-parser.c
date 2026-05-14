@@ -74,41 +74,34 @@ static GHashTable* parse_mdict_header(const char *header_text) {
     return tags;
 }
 
-static void fast_decrypt(uint8_t *data, size_t len, uint8_t *key, uint32_t key_len) {
+static void mdict_fast_decrypt(uint8_t *data, size_t len, const uint8_t *key, size_t key_len) {
     uint8_t previous = 0x36;
     for (size_t i = 0; i < len; i++) {
-        uint8_t t = (data[i] >> 4 | data[i] << 4) & 0xff;
+        uint8_t b = data[i];
+        uint8_t t = ((b >> 4) | (b << 4)) & 0xff;
         t = t ^ previous ^ (uint8_t)(i & 0xff) ^ key[i % key_len];
-        previous = data[i];
+        previous = b;
         data[i] = t;
     }
 }
 
-static void mdx_decrypt(uint8_t *comp_block, size_t len) {
-    uint8_t key_input[8];
-    memcpy(key_input, comp_block + 4, 4);
-    uint32_t magic = 0x3695;
-    memcpy(key_input + 4, &magic, 4);
-    
-    uint8_t key[16];
-    ripemd128(key_input, 8, key);
-    fast_decrypt(comp_block + 8, len - 8, key, 16);
-}
-
-static uint8_t* decompress_block(MdictReader *r, uint8_t *comp, size_t comp_size, size_t decomp_size, uint32_t type, gboolean is_key_info) {
-    if (is_key_info && (r->encrypt & 0x02)) {
-        mdx_decrypt(comp, comp_size);
-    }
-    
+static uint8_t* decompress_block(uint8_t *comp, size_t comp_size, size_t decomp_size, uint32_t type) {
     uint8_t *decomp = g_malloc(decomp_size);
-    if (type == 0) {
-        memcpy(decomp, comp + 8, decomp_size < (comp_size - 8) ? decomp_size : (comp_size - 8));
+    int r = -1;
+    if (type == 0 || type == 0x00000000) {
+        memcpy(decomp, comp + 8, (decomp_size < (comp_size - 8)) ? decomp_size : (comp_size - 8));
+        r = 0;
     } else if (type == 1 || type == 0x01000000) {
         lzo_uint out_len = decomp_size;
-        lzo1x_decompress_safe(comp + 8, (lzo_uint)comp_size - 8, decomp, &out_len, NULL);
+        r = lzo1x_decompress_safe(comp + 8, (lzo_uint)comp_size - 8, decomp, &out_len, NULL);
     } else if (type == 2 || type == 0x02000000) {
-        unsigned long dlen = decomp_size;
-        uncompress(decomp, &dlen, comp + 8, (unsigned long)comp_size - 8);
+        unsigned long dlen = (unsigned long)decomp_size;
+        r = uncompress(decomp, &dlen, comp + 8, (unsigned long)comp_size - 8);
+    }
+    
+    if (r != 0) {
+        g_free(decomp);
+        return NULL;
     }
     return decomp;
 }
@@ -127,12 +120,13 @@ MdictReader* mdict_reader_open(const char *path, GError **error) {
     uint32_t header_size = (uint32_t)read_uint32_be(f);
     uint8_t *header_bytes = g_malloc(header_size);
     if (fread(header_bytes, 1, header_size, f) != header_size) {
+        fprintf(stderr, "Error reading header bytes\n");
         mdict_reader_close(r); g_free(header_bytes);
         return NULL;
     }
 
-    uint32_t adler32;
-    fread(&adler32, 4, 1, f);
+    /* Adler32 after header */
+    fseek(f, 4, SEEK_CUR);
 
     gsize bytes_read, bytes_written;
     char *header_utf8 = g_convert((const char*)header_bytes, (gssize)header_size, "UTF-8", "UTF-16LE", &bytes_read, &bytes_written, NULL);
@@ -185,14 +179,14 @@ static gboolean mdict_reader_read_keys(MdictReader *r, GError **error) {
         memcpy(&num_entries, block + 8, 8); num_entries = __builtin_bswap64(num_entries);
         memcpy(&key_block_info_decomp_size, block + 16, 8); key_block_info_decomp_size = __builtin_bswap64(key_block_info_decomp_size);
         memcpy(&key_block_info_size, block + 24, 8); key_block_info_size = __builtin_bswap64(key_block_info_size);
-        uint32_t adler; fread(&adler, 4, 1, r->f);
+        /* Skip adler32 */
+        fseek(r->f, 4, SEEK_CUR);
     } else {
         uint32_t tmp;
         memcpy(&tmp, block, 4); num_key_blocks = ntohl(tmp);
         memcpy(&tmp, block + 4, 4); num_entries = ntohl(tmp);
         memcpy(&tmp, block + 8, 4); key_block_info_size = ntohl(tmp);
     }
-    g_free(block);
     r->num_entries = num_entries;
 
     uint8_t *kb_info_comp = g_malloc(key_block_info_size);
@@ -200,9 +194,20 @@ static gboolean mdict_reader_read_keys(MdictReader *r, GError **error) {
         g_free(kb_info_comp); return FALSE;
     }
     
+    if (r->encrypt == 2) {
+        uint8_t key[16];
+        uint8_t ksrc[8];
+        memcpy(ksrc, kb_info_comp + 4, 4); /* Adler checksum of compressed data */
+        ksrc[4] = 0x95; ksrc[5] = 0x36; ksrc[6] = 0x00; ksrc[7] = 0x00;
+        ripemd128(ksrc, 8, key);
+        mdict_fast_decrypt(kb_info_comp + 8, key_block_info_size - 8, key, 16);
+    }
+
     uint8_t *kb_info_decomp;
     if (r->version >= 2.0f) {
-        kb_info_decomp = decompress_block(r, kb_info_comp, key_block_info_size, (size_t)key_block_info_decomp_size, 2, TRUE);
+        uint32_t type;
+        memcpy(&type, kb_info_comp, 4); type = ntohl(type);
+        kb_info_decomp = decompress_block(kb_info_comp, key_block_info_size, (size_t)key_block_info_decomp_size, type);
     } else {
         kb_info_decomp = kb_info_comp; kb_info_comp = NULL;
     }
@@ -219,9 +224,9 @@ static gboolean mdict_reader_read_keys(MdictReader *r, GError **error) {
         p += r->number_width; /* Skip num_entries */
         if (r->version >= 2.0f) {
             uint16_t head_size; memcpy(&head_size, p, 2); head_size = ntohs(head_size);
-            p += 2 + head_size * width + width;
+            p += 2 + (size_t)head_size * width + width;
             uint16_t tail_size; memcpy(&tail_size, p, 2); tail_size = ntohs(tail_size);
-            p += 2 + tail_size * width + width;
+            p += 2 + (size_t)tail_size * width + width;
         } else {
             p += 1 + *p; p += 1 + *p;
         }
@@ -247,8 +252,8 @@ static gboolean mdict_reader_read_keys(MdictReader *r, GError **error) {
         if (fread(comp_block, 1, kb_infos[i].comp_size, r->f) != kb_infos[i].comp_size) {
             g_free(comp_block); continue;
         }
-        uint32_t type = ntohl(*(uint32_t*)comp_block);
-        uint8_t *decomp_block = decompress_block(r, comp_block, (size_t)kb_infos[i].comp_size, (size_t)kb_infos[i].decomp_size, type, FALSE);
+        uint32_t type; memcpy(&type, comp_block, 4); type = ntohl(type);
+        uint8_t *decomp_block = decompress_block(comp_block, (size_t)kb_infos[i].comp_size, (size_t)kb_infos[i].decomp_size, type);
         g_free(comp_block);
         if (!decomp_block) continue;
 
@@ -301,7 +306,7 @@ gboolean mdict_reader_iterate(MdictReader *r, MdictEntryCallback callback, gpoin
     (void)num_entries; (void)rb_size; (void)rb_info_size;
 
     typedef struct { uint64_t comp_size; uint64_t decomp_size; } RBInfo;
-    RBInfo *rb_infos = g_new(RBInfo, num_record_blocks);
+    RBInfo *rb_infos = g_new(RBInfo, (gsize)num_record_blocks);
     for (uint64_t i = 0; i < num_record_blocks; i++) {
         rb_infos[i].comp_size = mdict_read_number(r, r->f);
         rb_infos[i].decomp_size = mdict_read_number(r, r->f);
@@ -312,9 +317,11 @@ gboolean mdict_reader_iterate(MdictReader *r, MdictEntryCallback callback, gpoin
     
     for (uint64_t i = 0; i < num_record_blocks; i++) {
         uint8_t *comp_block = g_malloc(rb_infos[i].comp_size);
-        fread(comp_block, 1, rb_infos[i].comp_size, r->f);
-        uint32_t type = ntohl(*(uint32_t*)comp_block);
-        uint8_t *decomp_block = decompress_block(r, comp_block, (size_t)rb_infos[i].comp_size, (size_t)rb_infos[i].decomp_size, type, FALSE);
+        if (fread(comp_block, 1, rb_infos[i].comp_size, r->f) != rb_infos[i].comp_size) {
+            g_free(comp_block); continue;
+        }
+        uint32_t type; memcpy(&type, comp_block, 4); type = ntohl(type);
+        uint8_t *decomp_block = decompress_block(comp_block, (size_t)rb_infos[i].comp_size, (size_t)rb_infos[i].decomp_size, type);
         g_free(comp_block);
         if (!decomp_block) continue;
         

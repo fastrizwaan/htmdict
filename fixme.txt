@@ -1,0 +1,40 @@
+Updated the sidebar to expose all headwords without the old 2,000-entry cap.
+
+The key change is in src/main.c: the sidebar now uses a virtual GtkListView backed by a custom GListModel over the mmap’d FlatIndex. That means the full headword count is available for scrolling, but GTK only creates visible row widgets, so RAM and CPU stay low even for large dictionaries.
+
+Search still uses the existing filtered index array, but the empty-search sidebar now streams directly from the flat index instead of prebuilding/appending thousands of rows.
+
+Verified with:
+
+
+static void on_row_activated(GtkListBox *box, GtkListBoxRow *row, gpointer ud) {
+    (void)box;
+    AppState   *app = ud;
+    const char *w   = g_object_get_data(G_OBJECT(row), "word");
+    if (w) load_word(app, w);
+
+replaced with
+static void on_list_item_activated(GtkListView *view, guint position, gpointer ud) {
+    (void)view;
+    AppState *app = ud;
+    char *word = headword_model_dup_word_at(app->headword_model, position);
+    if (word) load_word(app, word);
+    g_free(word);
+}
+
+but with gtklistview the current cliked item is not remaining highlight when we move our mouse pointer over other gktklistview item
+
+say there are 3 headwords in a dictionary 
+
+Apple
+Banana
+Cherry
+
+say we click in Banana, then it will show the result for Apple headeword, but as soon as we hover on say Banana or Cherry, The Apple Headword loses it's highlight.
+
+Earlier gtklistbox worked properly with clikced word higlihght and on hover over other items highlight with grey/opacity color. but failed miserably with all headword entries, but we can't go back to using gtklistbox. 
+
+Can we make the gtklistview entries work like gtklistbox keeps the clicked stay higlight in blue (default gtk4 colors) and higlhthed other items on hover grey or with opacity.
+
+
+Also earlier we had mdx2diction work nicely with it's own html to diction by keeping the older html. now we are converting html from mdx to our custom, this breaks a lot of mdx; so we should properly use our standard html5 with mdx html.

@@ -95,26 +95,38 @@ static void mdd_resource_callback(const char *key, const uint8_t *data, size_t l
 
 int main(int argc, char *argv[]) {
     if (argc < 2) {
-        fprintf(stderr, "Usage: %s input.mdx|input.mdd|input.txt.html [output_dir]\n", argv[0]);
+        fprintf(stderr, "Usage: %s input.mdx|input.mdd|input.txt.html|directory [output_dir]\n", argv[0]);
         return 1;
     }
 
     const char *input_path = argv[1];
-    char *input_dir_name = g_path_get_dirname(input_path);
-    char *base_name = g_path_get_basename(input_path);
-    char *stem = g_strdup(base_name);
-    char *ext = strrchr(stem, '.');
+    if (!g_file_test(input_path, G_FILE_TEST_EXISTS)) {
+        fprintf(stderr, "Error: Input path does not exist: %s\n", input_path);
+        return 1;
+    }
+
+    char *input_dir_name = NULL;
+    char *stem = NULL;
     
-    /* Handle .txt.html specifically */
-    if (ext && g_ascii_strcasecmp(ext, ".html") == 0) {
-        char *p = stem + (ext - stem);
-        if (p >= stem + 4 && g_ascii_strncasecmp(p - 4, ".txt", 4) == 0) {
-            *(p - 4) = '\0';
-        } else {
+    if (g_file_test(input_path, G_FILE_TEST_IS_DIR)) {
+        input_dir_name = g_strdup(input_path);
+        stem = g_path_get_basename(input_path);
+    } else {
+        input_dir_name = g_path_get_dirname(input_path);
+        char *base_name = g_path_get_basename(input_path);
+        stem = g_strdup(base_name);
+        char *ext = strrchr(stem, '.');
+        if (ext && g_ascii_strcasecmp(ext, ".html") == 0) {
+            char *p = stem + (ext - stem);
+            if (p >= stem + 4 && g_ascii_strncasecmp(p - 4, ".txt", 4) == 0) {
+                *(p - 4) = '\0';
+            } else {
+                *ext = '\0';
+            }
+        } else if (ext) {
             *ext = '\0';
         }
-    } else if (ext) {
-        *ext = '\0';
+        g_free(base_name);
     }
 
     char *output_dir = (argc > 2) ? g_strdup(argv[2]) : g_strdup_printf("%s_diction", stem);
@@ -155,8 +167,13 @@ int main(int argc, char *argv[]) {
                 snprintf(css_path, sizeof(css_path), "%s/style.css", output_dir);
                 FILE *css = fopen(css_path, "a"); if (css) fclose(css);
                 processed = TRUE;
+            } else {
+                fprintf(stderr, "Error: Could not create output file %s\n", html_path);
             }
             mdict_reader_close(r);
+        } else if (err) {
+            fprintf(stderr, "Error opening MDX: %s\n", err->message);
+            g_clear_error(&err);
         }
     }
 
@@ -217,19 +234,25 @@ int main(int argc, char *argv[]) {
     }
 
     if (processed) {
-        fprintf(stderr, "Packaging into %s.diction...\n", stem);
-        char *cmd = g_strdup_printf("cd '%s' && zip -rq '../%s.diction' .", output_dir, stem);
+        char *cwd = g_get_current_dir();
+        char *diction_path = g_build_filename(cwd, g_strdup_printf("%s.diction", stem), NULL);
+        
+        fprintf(stderr, "Packaging into %s...\n", diction_path);
+        char *cmd = g_strdup_printf("cd '%s' && zip -rq '%s' .", output_dir, diction_path);
         if (system(cmd) != 0) {
             fprintf(stderr, "Warning: Failed to create .diction file. Is 'zip' installed?\n");
         }
+        fprintf(stderr, "Done. Output in %s/ and %s\n", output_dir, diction_path);
+        
         g_free(cmd);
-        fprintf(stderr, "Done. Output in %s/ and %s.diction\n", output_dir, stem);
+        g_free(diction_path);
+        g_free(cwd);
     } else {
         fprintf(stderr, "Error: Could not find any valid MDict or legacy files for '%s'\n", stem);
     }
 
     g_free(mdx_path); g_free(mdd_path); g_free(legacy_path);
-    g_free(stem); g_free(base_name); g_free(input_dir_name); g_free(output_dir);
+    g_free(stem); g_free(input_dir_name); g_free(output_dir);
     if (err) { fprintf(stderr, "Error: %s\n", err->message); g_error_free(err); return 1; }
     
     return processed ? 0 : 1;

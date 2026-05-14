@@ -12,6 +12,7 @@
 
 static GPtrArray *cli_paths;
 static void app_state_free(gpointer p);
+typedef struct _HeadwordModel HeadwordModel;
 
 typedef struct {
     AdwApplication  *app;
@@ -19,9 +20,12 @@ typedef struct {
     guint            current;
     GtkDropDown     *dict_dropdown;
     GtkSearchEntry  *search;
-    GtkListBox      *list;
+    GtkListView     *list_view;
+    GtkSingleSelection *selection;
+    HeadwordModel   *headword_model;
     WebKitWebView   *webview;
     GArray          *filter_indices; /* array of size_t (flat-index positions) */
+    gboolean         filter_active;
     gboolean         fts_enabled;
     AdwStyleManager *style_mgr;
     gboolean         is_dark;
@@ -30,8 +34,6 @@ typedef struct {
     GtkProgressBar  *progress_bar;
     GtkLabel        *progress_label;
     GtkButton       *theme_toggle;
-    guint            list_idle_id;
-    size_t           list_populate_offset;
 } AppState;
 
 typedef struct {
@@ -51,6 +53,123 @@ typedef struct {
 } DictInfo;
 
 static void rebuild_list(AppState *app);
+static HtmDict *app_active_dict(AppState *app);
+
+struct _HeadwordModel {
+    GObject parent_instance;
+    AppState *app;
+    guint n_items;
+};
+
+typedef struct {
+    GObjectClass parent_class;
+} HeadwordModelClass;
+
+static GType headword_model_get_item_type(GListModel *model);
+static guint headword_model_get_n_items(GListModel *model);
+static gpointer headword_model_get_item(GListModel *model, guint position);
+static void headword_model_list_model_init(GListModelInterface *iface);
+
+G_DEFINE_TYPE_WITH_CODE(HeadwordModel, headword_model, G_TYPE_OBJECT,
+                        G_IMPLEMENT_INTERFACE(G_TYPE_LIST_MODEL, headword_model_list_model_init))
+
+static void headword_model_class_init(HeadwordModelClass *klass) {
+    (void)klass;
+}
+
+static void headword_model_init(HeadwordModel *model) {
+    model->app = NULL;
+    model->n_items = 0;
+}
+
+static HeadwordModel *headword_model_new(AppState *app) {
+    HeadwordModel *model = g_object_new(headword_model_get_type(), NULL);
+    model->app = app;
+    return model;
+}
+
+static GType headword_model_get_item_type(GListModel *model) {
+    (void)model;
+    return GTK_TYPE_STRING_OBJECT;
+}
+
+static gboolean headword_model_flat_pos(HeadwordModel *model, guint position, size_t *out_pos) {
+    AppState *app = model ? model->app : NULL;
+    HtmDict *d = app ? app_active_dict(app) : NULL;
+    FlatIndex *fi = d ? htm_dict_get_flat_index(d) : NULL;
+    if (!fi) return FALSE;
+
+    if (app->filter_active) {
+        if (position >= app->filter_indices->len) return FALSE;
+        *out_pos = g_array_index(app->filter_indices, size_t, position);
+    } else {
+        if ((size_t)position >= flat_index_count(fi)) return FALSE;
+        *out_pos = (size_t)position;
+    }
+    return TRUE;
+}
+
+static guint headword_model_get_n_items(GListModel *list_model) {
+    HeadwordModel *model = (HeadwordModel *)list_model;
+    return model ? model->n_items : 0;
+}
+
+static guint headword_model_compute_live_count(HeadwordModel *model) {
+    AppState *app = model ? model->app : NULL;
+    HtmDict *d = app ? app_active_dict(app) : NULL;
+    FlatIndex *fi = d ? htm_dict_get_flat_index(d) : NULL;
+    if (!fi) return 0;
+    if (app->filter_active) return app->filter_indices->len;
+
+    size_t count = flat_index_count(fi);
+    return count > G_MAXUINT ? G_MAXUINT : (guint)count;
+}
+
+static gpointer headword_model_get_item(GListModel *list_model, guint position) {
+    HeadwordModel *model = (HeadwordModel *)list_model;
+    AppState *app = model ? model->app : NULL;
+    HtmDict *d = app ? app_active_dict(app) : NULL;
+    FlatIndex *fi = d ? htm_dict_get_flat_index(d) : NULL;
+    size_t flat_pos = 0;
+    if (!fi || !headword_model_flat_pos(model, position, &flat_pos)) return NULL;
+
+    const FlatTreeEntry *e = flat_index_get(fi, flat_pos);
+    if (!e) return NULL;
+
+    char *word = g_strndup(fi->mmap_data + e->h_off, e->h_len);
+    GtkStringObject *obj = gtk_string_object_new(word);
+    g_free(word);
+    return obj;
+}
+
+static void headword_model_list_model_init(GListModelInterface *iface) {
+    iface->get_item_type = headword_model_get_item_type;
+    iface->get_n_items = headword_model_get_n_items;
+    iface->get_item = headword_model_get_item;
+}
+
+static char *headword_model_dup_word_at(HeadwordModel *model, guint position) {
+    AppState *app = model ? model->app : NULL;
+    HtmDict *d = app ? app_active_dict(app) : NULL;
+    FlatIndex *fi = d ? htm_dict_get_flat_index(d) : NULL;
+    size_t flat_pos = 0;
+    if (!fi || !headword_model_flat_pos(model, position, &flat_pos)) return NULL;
+
+    const FlatTreeEntry *e = flat_index_get(fi, flat_pos);
+    if (!e) return NULL;
+    return g_strndup(fi->mmap_data + e->h_off, e->h_len);
+}
+
+static void headword_model_notify_rebuilt(AppState *app) {
+    if (!app || !app->headword_model) return;
+    guint old_count = app->headword_model->n_items;
+    guint new_count = headword_model_compute_live_count(app->headword_model);
+    app->headword_model->n_items = new_count;
+    guint changed = old_count > new_count ? old_count : new_count;
+    if (changed > 0) {
+        g_list_model_items_changed(G_LIST_MODEL(app->headword_model), 0, old_count, new_count);
+    }
+}
 
 static ProgressInfo* g_new_progress_info(AppState *app, const char *msg, double progress) {
     ProgressInfo *pi = g_new(ProgressInfo, 1);
@@ -503,63 +622,16 @@ static gboolean policy_decide_cb(WebKitWebView *wv, WebKitPolicyDecision *decisi
     return FALSE;
 }
 
-/* ── list rebuild using FlatIndex ─────────────────────────────── */
-static gboolean populate_list_idle(gpointer data) {
-    AppState *app = data;
-    HtmDict *d = app_active_dict(app);
-    FlatIndex *fi = d ? htm_dict_get_flat_index(d) : NULL;
-    if (!fi) {
-        app->list_idle_id = 0;
-        return G_SOURCE_REMOVE;
-    }
-
-    size_t count = app->filter_indices->len;
-    size_t chunk_size = 50;
-    size_t end = app->list_populate_offset + chunk_size;
-    if (end > count) end = count;
-
-    for (size_t i = app->list_populate_offset; i < end; i++) {
-        size_t pos = g_array_index(app->filter_indices, size_t, i);
-        const FlatTreeEntry *e = flat_index_get(fi, pos);
-        if (!e) continue;
-
-        char *word = g_strndup(fi->mmap_data + e->h_off, e->h_len);
-        GtkWidget *row = gtk_list_box_row_new();
-        GtkWidget *lbl = gtk_label_new(word);
-        gtk_label_set_xalign(GTK_LABEL(lbl), 0);
-        gtk_widget_set_margin_start(lbl, 12); gtk_widget_set_margin_end(lbl, 12);
-        gtk_widget_set_margin_top(lbl, 8);    gtk_widget_set_margin_bottom(lbl, 8);
-        gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), lbl);
-        g_object_set_data_full(G_OBJECT(row), "word", word, g_free);
-        gtk_list_box_append(app->list, row);
-    }
-
-    app->list_populate_offset = end;
-
-    if (app->list_populate_offset >= count) {
-        app->list_idle_id = 0;
-        return G_SOURCE_REMOVE;
-    }
-
-    return G_SOURCE_CONTINUE;
-}
-
 static void rebuild_list(AppState *app) {
-    if (app->list_idle_id) {
-        g_source_remove(app->list_idle_id);
-        app->list_idle_id = 0;
-    }
-    /* Remove old rows */
-    for (;;) {
-        GtkWidget *ch = gtk_widget_get_first_child(GTK_WIDGET(app->list));
-        if (!ch) break;
-        gtk_list_box_remove(app->list, ch);
-    }
     g_array_set_size(app->filter_indices, 0);
+    app->filter_active = FALSE;
 
     HtmDict    *d = app_active_dict(app);
     FlatIndex  *fi = d ? htm_dict_get_flat_index(d) : NULL;
-    if (!fi || flat_index_count(fi) == 0) return;
+    if (!fi || flat_index_count(fi) == 0) {
+        headword_model_notify_rebuilt(app);
+        return;
+    }
 
     const char *raw_q = gtk_editable_get_text(GTK_EDITABLE(app->search));
     char *q = normalize_for_search(raw_q);
@@ -575,6 +647,7 @@ static void rebuild_list(AppState *app) {
                 size_t  pos = (size_t)eid;
                 g_array_append_val(app->filter_indices, pos);
             }
+            app->filter_active = TRUE;
             g_array_free(candidates, TRUE);
         }
     }
@@ -582,12 +655,9 @@ static void rebuild_list(AppState *app) {
     if (!fts_hit) {
         size_t total = flat_index_count(fi);
         if (!q || !q[0]) {
-            /* No query — show first 2000 entries only for snappy performance */
-            size_t show_count = (total > 2000) ? 2000 : total;
-            for (size_t i = 0; i < show_count; i++) {
-                g_array_append_val(app->filter_indices, i);
-            }
+            app->filter_active = FALSE;
         } else {
+            app->filter_active = TRUE;
             /* 1. Try prefix search first (extremely fast) */
             size_t start = flat_index_search_prefix(fi, q);
             if (start != (size_t)-1) {
@@ -636,9 +706,7 @@ static void rebuild_list(AppState *app) {
     }
     g_free(q);
 
-    /* Start idle population */
-    app->list_populate_offset = 0;
-    app->list_idle_id = g_idle_add(populate_list_idle, app);
+    headword_model_notify_rebuilt(app);
 }
 
 static void on_search_changed(GtkSearchEntry *e, gpointer ud) {
@@ -648,11 +716,12 @@ static void on_search_changed(GtkSearchEntry *e, gpointer ud) {
     load_exact_match_if_any(app);
 }
 
-static void on_row_activated(GtkListBox *box, GtkListBoxRow *row, gpointer ud) {
-    (void)box;
-    AppState   *app = ud;
-    const char *w   = g_object_get_data(G_OBJECT(row), "word");
-    if (w) load_word(app, w);
+static void on_list_item_activated(GtkListView *view, guint position, gpointer ud) {
+    (void)view;
+    AppState *app = ud;
+    char *word = headword_model_dup_word_at(app->headword_model, position);
+    if (word) load_word(app, word);
+    g_free(word);
 }
 
 static void on_dict_selected(GObject *obj, GParamSpec *pspec, gpointer ud) {
@@ -705,6 +774,27 @@ static GtkWidget *build_settings_popover(AppState *app) {
     return pop;
 }
 
+static void headword_factory_setup(GtkListItemFactory *factory, GtkListItem *item, gpointer ud) {
+    (void)factory;
+    (void)ud;
+    GtkWidget *lbl = gtk_label_new(NULL);
+    gtk_label_set_xalign(GTK_LABEL(lbl), 0);
+    gtk_label_set_ellipsize(GTK_LABEL(lbl), PANGO_ELLIPSIZE_END);
+    gtk_widget_set_margin_start(lbl, 12);
+    gtk_widget_set_margin_end(lbl, 12);
+    gtk_widget_set_margin_top(lbl, 8);
+    gtk_widget_set_margin_bottom(lbl, 8);
+    gtk_list_item_set_child(item, lbl);
+}
+
+static void headword_factory_bind(GtkListItemFactory *factory, GtkListItem *item, gpointer ud) {
+    (void)factory;
+    (void)ud;
+    GtkStringObject *obj = gtk_list_item_get_item(item);
+    GtkWidget *lbl = gtk_list_item_get_child(item);
+    gtk_label_set_text(GTK_LABEL(lbl), obj ? gtk_string_object_get_string(obj) : "");
+}
+
 /* ── dict discovery ────────────────────────────────────────────── */
 static gboolean filename_is_dict_archive(const char *name) {
     if (!name) return FALSE;
@@ -747,6 +837,7 @@ static void app_activate(GtkApplication *gtk_app, gpointer ud) {
     app->app              = ADW_APPLICATION(gtk_app);
     app->dicts            = g_ptr_array_new_with_free_func((GDestroyNotify)htm_dict_close);
     app->filter_indices   = g_array_new(FALSE, FALSE, sizeof(size_t));
+    app->filter_active    = FALSE;
     app->fts_enabled      = FALSE;
     app->style_mgr        = adw_style_manager_get_default();
     load_config(app);
@@ -839,10 +930,16 @@ static void app_activate(GtkApplication *gtk_app, gpointer ud) {
     gtk_widget_set_margin_bottom(GTK_WIDGET(app->search), 12);
     g_signal_connect(app->search, "search-changed", G_CALLBACK(on_search_changed), app);
 
-    app->list = GTK_LIST_BOX(gtk_list_box_new());
-    g_signal_connect(app->list, "row-activated", G_CALLBACK(on_row_activated), app);
+    app->headword_model = headword_model_new(app);
+    app->selection = GTK_SINGLE_SELECTION(gtk_single_selection_new(G_LIST_MODEL(g_object_ref(app->headword_model))));
+    GtkListItemFactory *factory = gtk_signal_list_item_factory_new();
+    g_signal_connect(factory, "setup", G_CALLBACK(headword_factory_setup), app);
+    g_signal_connect(factory, "bind", G_CALLBACK(headword_factory_bind), app);
+    app->list_view = GTK_LIST_VIEW(gtk_list_view_new(GTK_SELECTION_MODEL(g_object_ref(app->selection)), factory));
+    gtk_list_view_set_single_click_activate(app->list_view, TRUE);
+    g_signal_connect(app->list_view, "activate", G_CALLBACK(on_list_item_activated), app);
     GtkWidget *scr = gtk_scrolled_window_new();
-    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scr), GTK_WIDGET(app->list));
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scr), GTK_WIDGET(app->list_view));
     gtk_widget_set_vexpand(scr, TRUE);
     gtk_box_append(GTK_BOX(side), GTK_WIDGET(app->search));
     gtk_box_append(GTK_BOX(side), scr);
@@ -907,8 +1004,9 @@ static void app_state_free(gpointer p) {
     if (!app) return;
     g_ptr_array_unref(app->dicts);
     g_array_unref(app->filter_indices);
+    g_clear_object(&app->selection);
+    g_clear_object(&app->headword_model);
     g_free(app->last_loaded_word);
-    if (app->list_idle_id) g_source_remove(app->list_idle_id);
     g_free(app);
 }
 

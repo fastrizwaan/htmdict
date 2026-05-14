@@ -1,46 +1,158 @@
-/* General Styles */
 body {
-    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-    background-color: #f4f7f6;
-    color: #333;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    padding: 40px;
-    line-height: 1.6;
+  margin: 1rem;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  line-height: 1.55;
+  color: #242424;
+  background: #ffffff;
 }
 
-h1 {
-    color: #2c3e50;
-    margin-bottom: 20px;
+.entry {
+  margin: 0 0 1.5rem;
 }
 
-p {
-    margin-top: 20px;
-    font-style: italic;
-    color: #666;
+.entry > header {
+  margin-bottom: 0.45rem;
 }
 
-/* MathML Styling */
+.headword {
+  margin: 0;
+  font-size: 1.8rem;
+  font-weight: 700;
+  color: #9f2323;
+}
+
+.pronunciation {
+  color: #4d6070;
+  margin: 0.2rem 0 0.55rem;
+}
+
+.ipa {
+  font-family: "Charis SIL", "Noto Sans", sans-serif;
+}
+
+.pos-group {
+  margin: 0.65rem 0;
+}
+
+.pos {
+  font-style: italic;
+  font-weight: 600;
+  color: #5b5b5b;
+}
+
+.definitions {
+  margin-top: 0.25rem;
+}
+
+.examples {
+  margin: 0.6rem 0;
+}
+
+.example {
+  margin: 0.4rem 0;
+  padding-left: 0.8rem;
+  border-left: 3px solid #d6dde3;
+  color: #334155;
+}
+
+.etymology,
+.notes {
+  color: #555;
+}
+
+.translations {
+  display: grid;
+  gap: 0.35rem;
+  margin: 0.6rem 0;
+}
+
+.translation::before {
+  content: attr(lang);
+  display: inline-block;
+  min-width: 2.4rem;
+  margin-right: 0.45rem;
+  color: #697586;
+  font-size: 0.82em;
+  text-transform: uppercase;
+}
+
+a {
+  color: #0f5f8f;
+  text-decoration-thickness: 0.08em;
+}
+
+img,
+video {
+  max-width: 100%;
+  height: auto;
+}
+
+table {
+  border-collapse: collapse;
+  margin: 0.8rem 0;
+}
+
+th,
+td {
+  border: 1px solid #d9dee3;
+  padding: 0.35rem 0.5rem;
+}
+
 math {
-    font-size: 1.5rem;
-    background: white;
-    padding: 20px 40px;
-    border-radius: 8px;
-    box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-    margin: 20px 0;
+  font-size: 1.5rem;
 }
 
-/* Adjusting specific MathML elements for better spacing */
-mfrac {
-    padding: 0 5px;
+ol.upper-roman {
+  list-style-type: upper-roman;
 }
 
-mrow {
-    padding: 2px;
+ol.lower-roman {
+  list-style-type: lower-roman;
 }
 
-/* Ensuring symbols like plus/minus and square roots look crisp */
-mo {
-    padding: 0 2px;
+ol.lower-alpha {
+  list-style-type: lower-alpha;
+}
+
+ol.upper-alpha {
+  list-style-type: upper-alpha;
+}
+
+ol.decimal {
+  list-style-type: decimal;
+}
+
+ol.decimal-paren,
+ol.lower-alpha-paren,
+ol.upper-alpha-paren {
+  list-style: none;
+  counter-reset: item;
+  padding-left: 1.4rem;
+}
+
+ol.decimal-paren > li,
+ol.lower-alpha-paren > li,
+ol.upper-alpha-paren > li {
+  counter-increment: item;
+}
+
+ol.decimal-paren > li::before {
+  content: counter(item) ") ";
+}
+
+ol.lower-alpha-paren > li::before {
+  content: counter(item, lower-alpha) ") ";
+}
+
+ol.upper-alpha-paren > li::before {
+  content: counter(item, upper-alpha) ") ";
+}
+
+ul.dash-list {
+  list-style: none;
+  padding-left: 1.2rem;
+}
+
+ul.dash-list li::before {
+  content: "- ";
 }

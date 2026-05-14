@@ -33,6 +33,11 @@ executable('htmdict', srcs,
 )
 
 executable('mdx2diction', 
-  ['src/mdx2diction.c', 'src/mdict-parser.c', 'src/ripemd128.c'],
+  ['src/mdx2diction.c', 'src/mdict-parser.c', 'src/ripemd128.c', 'src/diction-convert.c'],
   dependencies: [glib_dep, lzo_dep, zlib_dep],
+  install: true)
+
+executable('dsl2diction',
+  ['src/dsl2diction.c', 'src/diction-convert.c', 'src/zip-mmap.c'],
+  dependencies: [glib_dep, zlib_dep],
   install: true)

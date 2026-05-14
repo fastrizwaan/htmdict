@@ -1,1 +1,30 @@
-body{font-family:sans-serif;margin:1rem}
+body {
+  margin: 1rem;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  line-height: 1.55;
+  color: #242424;
+}
+
+.entry {
+  margin-bottom: 1.5rem;
+}
+
+.headword {
+  margin: 0;
+  font-size: 1.8rem;
+  color: #9f2323;
+}
+
+.translations {
+  margin-top: 0.6rem;
+}
+
+.translation::before {
+  content: attr(lang);
+  display: inline-block;
+  min-width: 2.4rem;
+  margin-right: 0.45rem;
+  color: #697586;
+  font-size: 0.82em;
+  text-transform: uppercase;
+}

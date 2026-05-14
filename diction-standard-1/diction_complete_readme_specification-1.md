@@ -1684,7 +1684,97 @@ Most important modern Diction features:
 
 ---
 
-# 32. Important Design Philosophy
+# 34. Converter Output Requirements
+
+Converters that produce `.diction` archives must emit the same structure as hand-authored dictionaries.
+
+Required archive layout:
+
+```text
+MyDictionary.diction
+└── MyDictionary/
+    ├── MyDictionary.html
+    ├── style.css
+    └── meta.json
+```
+
+If the source format contains bundled media, extracted files must be written under:
+
+```text
+MyDictionary/
+└── media/
+```
+
+Converted entries must not be stored as opaque source-format dumps. Each entry should be normalized into the Diction entry model:
+
+```html
+<article id="book" class="entry">
+  <header>
+    <h1 class="headword">book</h1>
+  </header>
+
+  <section class="definitions">
+    ...
+  </section>
+</article>
+```
+
+Converter responsibilities:
+
+- create a top-level dictionary directory inside the ZIP archive
+- create `meta.json`, `style.css`, and the main HTML file
+- escape headwords safely in `id` attributes and text
+- rewrite local absolute media references such as `/image.png` to `media/image.png`
+- convert source-format cross-references to `entry://...` links
+- remove or ignore executable content such as scripts
+- keep only non-empty optional directories
+
+MDX/MDict converters should treat each MDX key as the Diction `article id` and visible `headword`. MDX record HTML may be preserved inside semantic Diction sections when the record cannot be losslessly decomposed further.
+
+DSL converters should map common DSL tags to HTML5:
+
+| DSL | Diction HTML |
+|---|---|
+| `[b]...[/b]` | `<strong>...</strong>` |
+| `[i]...[/i]` | `<em>...</em>` |
+| `[u]...[/u]` | `<u>...</u>` |
+| `[sup]...[/sup]` | `<sup>...</sup>` |
+| `[sub]...[/sub]` | `<sub>...</sub>` |
+| `[ref]book[/ref]` | `<a href="entry://book">book</a>` |
+| `[ex]...[/ex]` | `<section class="examples"><blockquote class="example">...</blockquote></section>` |
+| `[trn]...[/trn]` | `<section class="translations"><div class="translation">...</div></section>` |
+
+Unknown presentational DSL tags may be stripped when their content is still preserved.
+
+DSL converters should accept:
+
+- plain `.dsl`
+- compressed `.dsl.dz`
+- UTF-8 input
+- UTF-16LE input with BOM
+- UTF-16BE input with BOM
+
+If a DSL source has a related media package, converters should extract it into `media/` before packaging the `.diction` archive.
+
+Recognized sidecar media names:
+
+```text
+Dictionary.dsl.files.zip
+Dictionary.dsl.dz.files.zip
+Dictionary.dsl.files/
+Dictionary.dsl.dz.files/
+```
+
+Files from those sidecars should preserve their relative paths under:
+
+```text
+Dictionary/
+└── media/
+```
+
+---
+
+# 35. Important Design Philosophy
 
 Diction is NOT a normal website format.
 
@@ -1715,7 +1805,7 @@ This keeps the format:
 
 ---
 
-# 28. Final Recommended Structure
+# 36. Final Recommended Structure
 
 Recommended structure for most dictionaries:
 
@@ -1745,4 +1835,3 @@ This keeps Diction dictionaries:
 - scalable
 - understandable
 - future-proof
-

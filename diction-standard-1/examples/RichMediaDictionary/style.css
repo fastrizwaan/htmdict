@@ -1,1 +1,35 @@
-body{font-family:sans-serif;margin:1rem}.headword{font-size:2rem;font-weight:bold}img,video{max-width:300px}
+body {
+  margin: 1rem;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  line-height: 1.55;
+  color: #242424;
+}
+
+.headword {
+  margin: 0;
+  font-size: 1.8rem;
+  color: #9f2323;
+}
+
+.pronunciation {
+  color: #4d6070;
+  margin: 0.2rem 0 0.55rem;
+}
+
+.pos {
+  font-style: italic;
+  font-weight: 600;
+  color: #5b5b5b;
+}
+
+.etymology {
+  color: #555;
+}
+
+img,
+video {
+  display: block;
+  max-width: 300px;
+  height: auto;
+  margin: 0.7rem 0;
+}

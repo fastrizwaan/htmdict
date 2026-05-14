@@ -1,261 +1,271 @@
+#include "diction-convert.h"
+#include "mdict-parser.h"
+#include <errno.h>
+#include <glib.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <ctype.h>
-#include <sys/stat.h>
-#include <libgen.h>
-#include "mdict-parser.h"
-
-/* Helper to normalize media paths like src="/foo.png" to src="media/foo.png" */
-void print_normalized_content(FILE *out, const uint8_t *data, size_t len) {
-    const uint8_t *p = data;
-    const uint8_t *end = data + len;
-    while (p < end) {
-        if (end - p >= 6 && strncmp((const char*)p, "src=\"/", 6) == 0) {
-            fprintf(out, "src=\"media/");
-            p += 6;
-        } else if (end - p >= 6 && strncmp((const char*)p, "src='/", 6) == 0) {
-            fprintf(out, "src='media/");
-            p += 6;
-        } else if (end - p >= 7 && strncmp((const char*)p, "href=\"/", 7) == 0) {
-            fprintf(out, "href=\"media/");
-            p += 7;
-        } else if (end - p >= 7 && strncmp((const char*)p, "href='/", 7) == 0) {
-            fprintf(out, "href='media/");
-            p += 7;
-        } else {
-            fputc(*p, out);
-            p++;
-        }
-    }
-    fputc('\n', out);
-}
-
-/* Helper to escape double quotes in HTML attributes */
-void print_escaped_id(FILE *out, const char *s) {
-    while (*s) {
-        if (*s == '"') fprintf(out, "&quot;");
-        else fputc(*s, out);
-        s++;
-    }
-}
 
 typedef struct {
     FILE *out;
-} ExtractContext;
+} EntryContext;
+
+static char *stem_from_input(const char *input_path) {
+    if (g_file_test(input_path, G_FILE_TEST_IS_DIR)) {
+        return g_path_get_basename(input_path);
+    }
+
+    char *base = g_path_get_basename(input_path);
+    char *stem = g_strdup(base);
+    char *ext = strrchr(stem, '.');
+    if (ext && g_ascii_strcasecmp(ext, ".html") == 0) {
+        char *txt = ext - 4;
+        if (txt >= stem && g_ascii_strncasecmp(txt, ".txt", 4) == 0) *txt = '\0';
+        else *ext = '\0';
+    } else if (ext) {
+        *ext = '\0';
+    }
+    g_free(base);
+    return stem;
+}
+
+static void write_entry_open(FILE *out, const char *key) {
+    fputs("<article id=\"", out);
+    diction_print_html_attr(out, key);
+    fputs("\" class=\"entry\">\n", out);
+    fputs("  <header>\n    <h1 class=\"headword\">", out);
+    diction_print_html_text(out, key);
+    fputs("</h1>\n  </header>\n", out);
+}
+
+static char *extract_link_target(const uint8_t *data, size_t len) {
+    const char *start = (const char *)data + 8;
+    const char *end = (const char *)data + len;
+    const char *p = start;
+    while (p < end && *p != '\r' && *p != '\n' && *p != '\0') p++;
+    char *target = g_strndup(start, (gsize)(p - start));
+    g_strstrip(target);
+    return target;
+}
 
 static void mdx_entry_callback(const char *key, const uint8_t *data, size_t len, gpointer user_data) {
-    ExtractContext *ctx = user_data;
-    fprintf(ctx->out, "<article id=\"");
-    print_escaped_id(ctx->out, key);
-    fprintf(ctx->out, "\" class=\"entry\">\n");
-    
-    /* Check if it's a link */
-    if (len >= 8 && strncmp((const char*)data, "@@@LINK=", 8) == 0) {
-        /* Extract target word */
-        const char *target_start = (const char*)data + 8;
-        const char *target_end = target_start;
-        while (target_end < (const char*)data + len && *target_end != '\r' && *target_end != '\n' && *target_end != '\0') {
-            target_end++;
-        }
-        char *target = g_strndup(target_start, (gsize)(target_end - target_start));
-        char *trimmed = g_strstrip(target);
-        fprintf(ctx->out, "<a href=\"entry://%s\">@@@LINK=%s</a>\n", trimmed, trimmed);
+    EntryContext *ctx = user_data;
+
+    write_entry_open(ctx->out, key);
+    if (len >= 8 && strncmp((const char *)data, "@@@LINK=", 8) == 0) {
+        char *target = extract_link_target(data, len);
+        fputs("  <section class=\"cross-reference\">\n    <a href=\"entry://", ctx->out);
+        diction_print_html_attr(ctx->out, target);
+        fputs("\">", ctx->out);
+        diction_print_html_text(ctx->out, target);
+        fputs("</a>\n  </section>\n", ctx->out);
         g_free(target);
     } else {
-        print_normalized_content(ctx->out, data, len);
+        fputs("  <section class=\"definitions\">\n", ctx->out);
+        diction_print_normalized_fragment(ctx->out, data, len);
+        fputs("\n  </section>\n", ctx->out);
     }
-    fprintf(ctx->out, "</article>\n");
+    fputs("</article>\n\n", ctx->out);
 }
 
 static void mdd_resource_callback(const char *key, const uint8_t *data, size_t len, gpointer user_data) {
     if (!key || !key[0]) return;
-    fprintf(stderr, "Extracting %s (%zu bytes)\n", key, len);
-    const char *output_dir = user_data;
+
+    const char *dict_dir = user_data;
     char *path = g_strdup(key);
-    /* Replace backslashes with slashes */
-    for (char *p = path; *p; p++) if (*p == '\\') *p = '/';
-    
-    /* Remove leading slash if any */
-    const char *rel_path = (path[0] == '/') ? path + 1 : path;
-    
-    char *full_path = g_build_filename(output_dir, "media", rel_path, NULL);
+    for (char *p = path; *p; p++) {
+        if (*p == '\\') *p = '/';
+    }
+
+    const char *rel_path = path[0] == '/' ? path + 1 : path;
+    char *full_path = g_build_filename(dict_dir, "media", rel_path, NULL);
     char *dir = g_path_get_dirname(full_path);
     g_mkdir_with_parents(dir, 0755);
     g_free(dir);
-    
+
     FILE *f = fopen(full_path, "wb");
     if (f) {
         fwrite(data, 1, len, f);
         fclose(f);
+    } else {
+        fprintf(stderr, "Warning: could not write resource %s\n", full_path);
     }
+
     g_free(full_path);
     g_free(path);
 }
 
+static gboolean convert_mdx(const char *mdx_path, const DictionOutput *out, const char *fallback_name, GError **error) {
+    MdictReader *reader = mdict_reader_open(mdx_path, error);
+    if (!reader) return FALSE;
+
+    FILE *html = fopen(out->html_path, "w");
+    if (!html) {
+        g_set_error(error, G_FILE_ERROR, g_file_error_from_errno(errno), "Could not create %s", out->html_path);
+        mdict_reader_close(reader);
+        return FALSE;
+    }
+
+    EntryContext ctx = { .out = html };
+    fprintf(stderr, "Extracting MDX entries into Diction HTML: %s\n", out->html_path);
+    gboolean ok = mdict_reader_iterate(reader, mdx_entry_callback, &ctx, error);
+    fclose(html);
+
+    const char *title = mdict_reader_get_title(reader);
+    if (!title || !title[0]) title = fallback_name;
+
+    if (ok) {
+        ok = diction_write_meta(out->meta_path, out->dict_name, title, out->dict_name,
+                                out->html_name, "[\"en\"]", "[\"en\"]", error);
+    }
+
+    mdict_reader_close(reader);
+    return ok;
+}
+
+static gboolean convert_legacy_txt_html(const char *legacy_path, const DictionOutput *out, GError **error) {
+    FILE *in = fopen(legacy_path, "r");
+    if (!in) {
+        g_set_error(error, G_FILE_ERROR, g_file_error_from_errno(errno), "Could not open %s", legacy_path);
+        return FALSE;
+    }
+
+    FILE *html = fopen(out->html_path, "w");
+    if (!html) {
+        g_set_error(error, G_FILE_ERROR, g_file_error_from_errno(errno), "Could not create %s", out->html_path);
+        fclose(in);
+        return FALSE;
+    }
+
+    char *line = NULL;
+    size_t cap = 0;
+    ssize_t nread;
+    char *headword = NULL;
+    gboolean in_entry = FALSE;
+
+    fprintf(stderr, "Converting legacy source into Diction HTML: %s\n", out->html_path);
+    while ((nread = getline(&line, &cap, in)) != -1) {
+        while (nread > 0 && (line[nread - 1] == '\n' || line[nread - 1] == '\r')) {
+            line[--nread] = '\0';
+        }
+
+        if (!in_entry) {
+            if (nread == 0 || strcmp(line, "</>") == 0) continue;
+            headword = g_strdup(line);
+            write_entry_open(html, headword);
+            fputs("  <section class=\"definitions\">\n", html);
+            in_entry = TRUE;
+            continue;
+        }
+
+        if (strcmp(line, "</>") == 0) {
+            fputs("  </section>\n</article>\n\n", html);
+            g_clear_pointer(&headword, g_free);
+            in_entry = FALSE;
+        } else if (strncmp(line, "@@@LINK=", 8) == 0) {
+            char *target = g_strdup(line + 8);
+            g_strstrip(target);
+            fputs("    <a href=\"entry://", html);
+            diction_print_html_attr(html, target);
+            fputs("\">", html);
+            diction_print_html_text(html, target);
+            fputs("</a>\n", html);
+            g_free(target);
+        } else {
+            fputs("    ", html);
+            diction_print_normalized_fragment(html, (const uint8_t *)line, (size_t)nread);
+            fputc('\n', html);
+        }
+    }
+
+    if (in_entry) {
+        fputs("  </section>\n</article>\n", html);
+        g_free(headword);
+    }
+
+    g_free(line);
+    fclose(html);
+    fclose(in);
+
+    return diction_write_meta(out->meta_path, out->dict_name, out->dict_name, out->dict_name,
+                              out->html_name, "[\"en\"]", "[\"en\"]", error);
+}
+
 int main(int argc, char *argv[]) {
     if (argc < 2) {
-        fprintf(stderr, "Usage: %s input.mdx|input.mdd|input.txt.html|directory [output_dir]\n", argv[0]);
+        fprintf(stderr, "Usage: %s input.mdx|input.mdd|input.txt.html|directory [output_root]\n", argv[0]);
         return 1;
     }
 
     const char *input_path = argv[1];
     if (!g_file_test(input_path, G_FILE_TEST_EXISTS)) {
-        fprintf(stderr, "Error: Input path does not exist: %s\n", input_path);
+        fprintf(stderr, "Error: input path does not exist: %s\n", input_path);
         return 1;
     }
 
-    char *input_dir_name = NULL;
-    char *stem = NULL;
-    
-    if (g_file_test(input_path, G_FILE_TEST_IS_DIR)) {
-        input_dir_name = g_strdup(input_path);
-        stem = g_path_get_basename(input_path);
-    } else {
-        input_dir_name = g_path_get_dirname(input_path);
-        char *base_name = g_path_get_basename(input_path);
-        stem = g_strdup(base_name);
-        char *ext = strrchr(stem, '.');
-        if (ext && g_ascii_strcasecmp(ext, ".html") == 0) {
-            char *p = stem + (ext - stem);
-            if (p >= stem + 4 && g_ascii_strncasecmp(p - 4, ".txt", 4) == 0) {
-                *(p - 4) = '\0';
-            } else {
-                *ext = '\0';
-            }
-        } else if (ext) {
-            *ext = '\0';
-        }
-        g_free(base_name);
+    char *stem = stem_from_input(input_path);
+    char *input_dir = g_file_test(input_path, G_FILE_TEST_IS_DIR)
+        ? g_strdup(input_path)
+        : g_path_get_dirname(input_path);
+    DictionOutput *out = diction_output_new(stem, argc > 2 ? argv[2] : NULL);
+
+    GError *error = NULL;
+    gboolean processed = FALSE;
+    if (g_mkdir_with_parents(out->dict_dir, 0755) != 0) {
+        fprintf(stderr, "Error: could not create %s\n", out->dict_dir);
+        diction_output_free(out);
+        g_free(input_dir);
+        g_free(stem);
+        return 1;
     }
 
-    char *output_dir = (argc > 2) ? g_strdup(argv[2]) : g_strdup_printf("%s_diction", stem);
-    g_mkdir_with_parents(output_dir, 0755);
+    char *mdx_path = g_strdup_printf("%s/%s.mdx", input_dir, stem);
+    char *mdd_path = g_strdup_printf("%s/%s.mdd", input_dir, stem);
+    char *legacy_path = g_strdup_printf("%s/%s.txt.html", input_dir, stem);
 
-    gboolean processed = FALSE;
-    GError *err = NULL;
-
-    /* Check for MDX and MDD pairs */
-    char *mdx_path = g_strdup_printf("%s/%s.mdx", input_dir_name, stem);
-    char *mdd_path = g_strdup_printf("%s/%s.mdd", input_dir_name, stem);
-    char *legacy_path = g_strdup_printf("%s/%s.txt.html", input_dir_name, stem);
+    if (g_ascii_strcasecmp(input_path + MAX(0, (int)strlen(input_path) - 4), ".mdx") == 0) {
+        g_free(mdx_path);
+        mdx_path = g_strdup(input_path);
+    } else if (g_ascii_strcasecmp(input_path + MAX(0, (int)strlen(input_path) - 4), ".mdd") == 0) {
+        g_free(mdd_path);
+        mdd_path = g_strdup(input_path);
+    }
 
     if (g_file_test(mdx_path, G_FILE_TEST_EXISTS)) {
-        MdictReader *r = mdict_reader_open(mdx_path, &err);
-        if (r) {
-            char html_path[1024];
-            snprintf(html_path, sizeof(html_path), "%s/%s.html", output_dir, stem);
-            FILE *out = fopen(html_path, "w");
-            if (out) {
-                ExtractContext ctx = { .out = out };
-                fprintf(stderr, "Extracting entries from %s...\n", mdx_path);
-                if (!mdict_reader_iterate(r, mdx_entry_callback, &ctx, &err)) {
-                    fprintf(stderr, "Error during MDX iteration: %s\n", err ? err->message : "Unknown error");
-                }
-                fclose(out);
-                
-                /* Generate meta.json */
-                char meta_path[1024];
-                snprintf(meta_path, sizeof(meta_path), "%s/meta.json", output_dir);
-                FILE *meta = fopen(meta_path, "w");
-                if (meta) {
-                    fprintf(meta, "{\n  \"format\": 1,\n  \"id\": \"%s\",\n  \"name\": \"%s\",\n", stem, mdict_reader_get_title(r) ? mdict_reader_get_title(r) : stem);
-                    fprintf(meta, "  \"index_languages\": [\"en\"],\n  \"content_languages\": [\"en\"],\n");
-                    fprintf(meta, "  \"version\": \"1.0\",\n  \"stylesheet\": \"style.css\",\n  \"html\": \"%s.html\"\n}\n", stem);
-                    fclose(meta);
-                }
-                /* style.css */
-                char css_path[1024];
-                snprintf(css_path, sizeof(css_path), "%s/style.css", output_dir);
-                FILE *css = fopen(css_path, "a"); if (css) fclose(css);
-                processed = TRUE;
-            } else {
-                fprintf(stderr, "Error: Could not create output file %s\n", html_path);
+        processed = convert_mdx(mdx_path, out, stem, &error);
+    } else if (g_file_test(legacy_path, G_FILE_TEST_EXISTS)) {
+        processed = convert_legacy_txt_html(legacy_path, out, &error);
+    }
+
+    if (processed && g_file_test(mdd_path, G_FILE_TEST_EXISTS)) {
+        MdictReader *resources = mdict_reader_open(mdd_path, &error);
+        if (resources) {
+            fprintf(stderr, "Extracting MDD resources into %s/media\n", out->dict_dir);
+            if (!mdict_reader_iterate(resources, mdd_resource_callback, out->dict_dir, &error)) {
+                processed = FALSE;
             }
-            mdict_reader_close(r);
-        } else if (err) {
-            fprintf(stderr, "Error opening MDX: %s\n", err->message);
-            g_clear_error(&err);
+            mdict_reader_close(resources);
+        } else {
+            fprintf(stderr, "Warning: could not open MDD resources: %s\n", error ? error->message : "unknown error");
+            g_clear_error(&error);
         }
     }
 
-    if (g_file_test(mdd_path, G_FILE_TEST_EXISTS)) {
-        MdictReader *r = mdict_reader_open(mdd_path, &err);
-        if (r) {
-            fprintf(stderr, "Extracting resources from %s...\n", mdd_path);
-            mdict_reader_iterate(r, mdd_resource_callback, output_dir, &err);
-            mdict_reader_close(r);
-            processed = TRUE;
-        }
-    }
-
-    if (!processed && g_file_test(legacy_path, G_FILE_TEST_EXISTS)) {
-        FILE *in = fopen(legacy_path, "r");
-        if (in) {
-            char html_path[1024];
-            snprintf(html_path, sizeof(html_path), "%s/%s.html", output_dir, stem);
-            FILE *out = fopen(html_path, "w");
-            if (out) {
-                fprintf(stderr, "Converting legacy source %s -> %s\n", legacy_path, html_path);
-                char *line = NULL; size_t len = 0; ssize_t read; char *headword = NULL; int state = 0;
-                while ((read = getline(&line, &len, in)) != -1) {
-                    if (read > 0 && line[read - 1] == '\n') line[--read] = '\0';
-                    if (read > 0 && line[read - 1] == '\r') line[--read] = '\0';
-                    if (state == 0) {
-                        if (read == 0 || strcmp(line, "</>") == 0) continue;
-                        headword = g_strdup(line);
-                        fprintf(out, "<article id=\""); print_escaped_id(out, headword); fprintf(out, "\" class=\"entry\">\n");
-                        state = 1;
-                    } else {
-                        if (strcmp(line, "</>") == 0) {
-                            fprintf(out, "</article>\n"); g_free(headword); headword = NULL; state = 0;
-                        } else {
-                            if (strncmp(line, "@@@LINK=", 8) == 0) fprintf(out, "<a href=\"entry://%s\">%s</a>\n", line + 8, line);
-                            else print_normalized_content(out, (const uint8_t*)line, (size_t)read);
-                        }
-                    }
-                }
-                if (state == 1) { fprintf(out, "</article>\n"); g_free(headword); }
-                fclose(out);
-                
-                char meta_path[1024]; snprintf(meta_path, sizeof(meta_path), "%s/meta.json", output_dir);
-                FILE *meta = fopen(meta_path, "w");
-                if (meta) {
-                    fprintf(meta, "{\n  \"format\": 1,\n  \"id\": \"%s\",\n  \"name\": \"%s\",\n", stem, stem);
-                    fprintf(meta, "  \"index_languages\": [\"en\"],\n  \"content_languages\": [\"en\"],\n");
-                    fprintf(meta, "  \"version\": \"1.0\",\n  \"stylesheet\": \"style.css\",\n  \"html\": \"%s.html\"\n}\n", stem);
-                    fclose(meta);
-                }
-                char css_path[1024]; snprintf(css_path, sizeof(css_path), "%s/style.css", output_dir);
-                FILE *css = fopen(css_path, "a"); if (css) fclose(css);
-                processed = TRUE;
-                g_free(line);
-            }
-            fclose(in);
-        }
-    }
+    if (processed) processed = diction_write_standard_css(out->css_path, &error);
+    if (processed) processed = diction_package(out, &error);
 
     if (processed) {
-        char *cwd = g_get_current_dir();
-        char *diction_path = g_build_filename(cwd, g_strdup_printf("%s.diction", stem), NULL);
-        
-        fprintf(stderr, "Packaging into %s...\n", diction_path);
-        char *cmd = g_strdup_printf("cd '%s' && zip -rq '%s' .", output_dir, diction_path);
-        if (system(cmd) != 0) {
-            fprintf(stderr, "Warning: Failed to create .diction file. Is 'zip' installed?\n");
-        }
-        fprintf(stderr, "Done. Output in %s/ and %s\n", output_dir, diction_path);
-        
-        g_free(cmd);
-        g_free(diction_path);
-        g_free(cwd);
+        fprintf(stderr, "Done. Output directory: %s\n", out->output_root);
     } else {
-        fprintf(stderr, "Error: Could not find any valid MDict or legacy files for '%s'\n", stem);
+        fprintf(stderr, "Error: %s\n", error ? error->message : "no MDX or legacy source found");
     }
 
-    g_free(mdx_path); g_free(mdd_path); g_free(legacy_path);
-    g_free(stem); g_free(input_dir_name); g_free(output_dir);
-    if (err) { fprintf(stderr, "Error: %s\n", err->message); g_error_free(err); return 1; }
-    
+    g_clear_error(&error);
+    g_free(mdx_path);
+    g_free(mdd_path);
+    g_free(legacy_path);
+    diction_output_free(out);
+    g_free(input_dir);
+    g_free(stem);
     return processed ? 0 : 1;
 }

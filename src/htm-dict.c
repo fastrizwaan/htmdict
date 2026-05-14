@@ -279,17 +279,71 @@ static void htm_resolve_links(GPtrArray *tmps, const uint8_t *buf, size_t size) 
     int resolved_count = 0;
     for (guint i = 0; i < tmps->len; i++) {
         TmpEntry *te = g_ptr_array_index(tmps, i);
-        if (te->len >= 8 && strncmp((const char *)(buf + te->off), "@@@LINK=", 8) == 0) {
-            char *link_content = g_strndup((const char *)(buf + te->off + 8), te->len - 8);
-            char *target_word = g_strstrip(link_content);
+        
+        const char *content_ptr = (const char *)(buf + te->off);
+        size_t      content_len = te->len;
+
+        /* Skip any leading tags (like <article> or <a>) to find @@@LINK= */
+        while (content_len > 0 && *content_ptr == '<') {
+            const char *tag_end = memchr(content_ptr, '>', content_len);
+            if (tag_end) {
+                size_t tag_len = (size_t)(tag_end + 1 - content_ptr);
+                content_ptr += tag_len;
+                content_len -= tag_len;
+                /* Also skip any immediate whitespace after tag */
+                while (content_len > 0 && g_ascii_isspace(*content_ptr)) {
+                    content_ptr++;
+                    content_len--;
+                }
+            } else {
+                break;
+            }
+        }
+
+        if (content_len >= 8 && strncmp(content_ptr, "@@@LINK=", 8) == 0) {
+            const char *target_start = content_ptr + 8;
+            const char *target_end = target_start;
+            while (target_end < content_ptr + content_len && 
+                   *target_end != '<' && 
+                   !g_ascii_isspace(*target_end)) {
+                target_end++;
+            }
+            
+            char *target_word = g_strndup(target_start, (gsize)(target_end - target_start));
             TmpEntry *target = g_hash_table_lookup(lookup, target_word);
             int depth = 0;
             while (target && depth < 20) {
-                if (target->len >= 8 && strncmp((const char *)(buf + target->off), "@@@LINK=", 8) == 0) {
-                    char *next_link = g_strndup((const char *)(buf + target->off + 8), target->len - 8);
-                    char *next_target_word = g_strstrip(next_link);
+                const char *t_ptr = (const char *)(buf + target->off);
+                size_t      t_len = target->len;
+
+                /* Skip leading tags in target content as well */
+                while (t_len > 0 && *t_ptr == '<') {
+                    const char *t_tag_end = memchr(t_ptr, '>', t_len);
+                    if (t_tag_end) {
+                        size_t t_tag_len = (size_t)(t_tag_end + 1 - t_ptr);
+                        t_ptr += t_tag_len;
+                        t_len -= t_tag_len;
+                        while (t_len > 0 && g_ascii_isspace(*t_ptr)) {
+                            t_ptr++;
+                            t_len--;
+                        }
+                    } else {
+                        break;
+                    }
+                }
+
+                if (t_len >= 8 && strncmp(t_ptr, "@@@LINK=", 8) == 0) {
+                    const char *nt_start = t_ptr + 8;
+                    const char *nt_end = nt_start;
+                    while (nt_end < t_ptr + t_len && 
+                           *nt_end != '<' && 
+                           !g_ascii_isspace(*nt_end)) {
+                        nt_end++;
+                    }
+                    char *next_target_word = g_strndup(nt_start, (gsize)(nt_end - nt_start));
                     TmpEntry *next_target = g_hash_table_lookup(lookup, next_target_word);
-                    g_free(next_link);
+                    g_free(next_target_word);
+                    
                     if (!next_target || next_target == target) break;
                     target = next_target;
                     depth++;
@@ -302,7 +356,7 @@ static void htm_resolve_links(GPtrArray *tmps, const uint8_t *buf, size_t size) 
                 te->len = target->len;
                 resolved_count++;
             }
-            g_free(link_content);
+            g_free(target_word);
         }
     }
     if (resolved_count > 0) {

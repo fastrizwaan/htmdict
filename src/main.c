@@ -30,6 +30,8 @@ typedef struct {
     GtkProgressBar  *progress_bar;
     GtkLabel        *progress_label;
     GtkButton       *theme_toggle;
+    guint            list_idle_id;
+    size_t           list_populate_offset;
 } AppState;
 
 typedef struct {
@@ -199,11 +201,17 @@ static const char *theme_css(gboolean dark) {
         return "html, body { background-color: #1e1e1e !important; color: #e0e0e0 !important; } "
                "body { font-family: sans-serif; padding: 20px; line-height: 1.6; color-scheme: dark; } "
                "a { color: #8ab4f8 !important; } "
+               ".headword-row { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; } "
+               ".dict-name { flex-shrink: 0; font-size: 0.95rem; opacity: 0.72; } "
+               "article h1.headword { display: none; } "
                "font[color], span[style*='color'], div[style*='color'], p[style*='color'] { color: inherit !important; } "
                "*:not(html):not(body):not(img):not(svg):not(canvas):not(video) { background-color: transparent !important; }";
     } else {
         return "html, body { background: #fafafa !important; color: #1a1a1a !important; } "
                "body { font-family: sans-serif; padding: 20px; line-height: 1.6; color-scheme: light; } "
+               ".headword-row { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; } "
+               ".dict-name { flex-shrink: 0; font-size: 0.95rem; opacity: 0.72; } "
+               "article h1.headword { display: none; } "
                "a { color: #0066cc !important; }";
     }
 }
@@ -301,14 +309,20 @@ static char *build_page(AppState *app, const char *body_html) {
     const char *pfx  = d ? htm_dict_resource_prefix(d) : "";
     const char *id   = d ? htm_dict_id(d)               : "00000000";
     char *base = g_strdup_printf("htmdict://%s/%s", id, pfx);
-    char *css  = g_strdup(theme_css(current_is_dark(app)));
+    char *css_theme  = g_strdup(theme_css(current_is_dark(app)));
+    const char *custom_css_name = htm_dict_stylesheet(d);
+    char *custom_css_link = (custom_css_name && custom_css_name[0]) 
+                            ? g_strdup_printf("<link rel=\"stylesheet\" href=\"%s\">", custom_css_name) 
+                            : g_strdup("");
+
     char *page = g_strdup_printf(
         "<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
         "<base href=\"%s\"/>"
         "<style id=\"__htmdict_theme\">%s</style>"
+        "%s"
         "</head><body>%s</body></html>",
-        base, css, body_html ? body_html : "<p><i>No entry.</i></p>");
-    g_free(base); g_free(css);
+        base, css_theme, custom_css_link, body_html ? body_html : "<p><i>No entry.</i></p>");
+    g_free(base); g_free(css_theme); g_free(custom_css_link);
     return page;
 }
 
@@ -321,12 +335,21 @@ static void load_word(AppState *app, const char *word) {
         return;
     }
     char *html = htm_dict_get_definition_html(d, norm ? norm : word);
-    char *page = build_page(app, html && html[0] ? html : "<p><i>No entry.</i></p>");
+    char *full_html = NULL;
+    if (html && html[0]) {
+        full_html = g_strdup_printf(
+            "<div class=\"headword-row\">"
+            "<h1 class=\"headword\">%s</h1>"
+            "<span class=\"dict-name\">%s</span>"
+            "</div>%s", 
+            word, htm_dict_display_name(d), html);
+    }
+    char *page = build_page(app, full_html ? full_html : "<p><i>No entry.</i></p>");
     char *base = g_strdup_printf("htmdict://%s/%s", htm_dict_id(d), htm_dict_resource_prefix(d));
     webkit_web_view_load_html(app->webview, page, base);
     g_free(app->last_loaded_word);
     app->last_loaded_word = g_strdup(norm ? norm : word);
-    g_free(page); g_free(base); g_free(html); g_free(norm);
+    g_free(page); g_free(base); g_free(html); g_free(full_html); g_free(norm);
 }
 
 static void load_exact_match_if_any(AppState *app) {
@@ -361,47 +384,61 @@ static void scheme_request_cb(WebKitURISchemeRequest *request, gpointer user_dat
         return;
     }
 
+    const char *scheme = g_uri_get_scheme(gu);
     const char *host = g_uri_get_host(gu);
     const char *path = g_uri_get_path(gu);
     HtmDict *found = NULL;
     const char *rel = NULL;
 
-    if (host && strlen(host) == 8) {
-        /* New style: htmdict://id/path */
-        for (guint i = 0; i < app->dicts->len; i++) {
-            HtmDict *d = g_ptr_array_index(app->dicts, i);
-            if (strcmp(htm_dict_id(d), host) == 0) {
-                found = d;
-                break;
-            }
+    if (g_strcmp0(scheme, "media") == 0 || g_strcmp0(scheme, "sound") == 0) {
+        found = app_active_dict(app);
+        /* If there's a host, it's part of the path (e.g. media://media/image.jpg) */
+        if (host && host[0]) {
+            char *p = (path && path[0] == '/') ? (char *)path + 1 : (char *)path;
+            rel = g_build_filename(host, p, NULL);
+        } else {
+            rel = g_strdup((path && path[0] == '/') ? path + 1 : path);
         }
-        rel = (path && path[0] == '/') ? path + 1 : path;
-    } else {
-        /* Old style: htmdict:///id/path */
-        if (path && path[0] == '/' && strlen(path) >= 10) {
-            char idbuf[9]; memcpy(idbuf, path + 1, 8); idbuf[8] = '\0';
+    }
+
+    if (!found) {
+        if (host && strlen(host) == 8) {
+            /* New style: htmdict://id/path */
             for (guint i = 0; i < app->dicts->len; i++) {
                 HtmDict *d = g_ptr_array_index(app->dicts, i);
-                if (strcmp(htm_dict_id(d), idbuf) == 0) {
+                if (strcmp(htm_dict_id(d), host) == 0) {
                     found = d;
                     break;
                 }
             }
-            rel = path + 10;
+            rel = g_strdup((path && path[0] == '/') ? path + 1 : path);
+        } else {
+            /* Old style: htmdict:///id/path */
+            if (path && path[0] == '/' && strlen(path) >= 10) {
+                char idbuf[9]; memcpy(idbuf, path + 1, 8); idbuf[8] = '\0';
+                for (guint i = 0; i < app->dicts->len; i++) {
+                    HtmDict *d = g_ptr_array_index(app->dicts, i);
+                    if (strcmp(htm_dict_id(d), idbuf) == 0) {
+                        found = d;
+                        break;
+                    }
+                }
+                rel = g_strdup(path + 10);
+            }
         }
     }
 
     if (!found || !rel || !*rel) {
-        g_uri_unref(gu);
+        g_uri_unref(gu); g_free((char *)rel);
         webkit_uri_scheme_request_finish_error(request, g_error_new_literal(G_IO_ERROR, G_IO_ERROR_NOT_FOUND, "not found"));
         return;
     }
 
     GError *err = NULL; GBytes *gb = NULL; char *mime = NULL;
     if (!htm_dict_read_resource_bytes(found, rel, &gb, &mime, &err)) {
-        g_uri_unref(gu); webkit_uri_scheme_request_finish_error(request, err); return;
+        g_uri_unref(gu); g_free((char *)rel); webkit_uri_scheme_request_finish_error(request, err); return;
     }
-    g_uri_unref(gu);
+    g_uri_unref(gu); g_free((char *)rel);
     gsize len = g_bytes_get_size(gb);
     GInputStream *in = g_memory_input_stream_new_from_bytes(gb);
     g_bytes_unref(gb);
@@ -467,7 +504,51 @@ static gboolean policy_decide_cb(WebKitWebView *wv, WebKitPolicyDecision *decisi
 }
 
 /* ── list rebuild using FlatIndex ─────────────────────────────── */
+static gboolean populate_list_idle(gpointer data) {
+    AppState *app = data;
+    HtmDict *d = app_active_dict(app);
+    FlatIndex *fi = d ? htm_dict_get_flat_index(d) : NULL;
+    if (!fi) {
+        app->list_idle_id = 0;
+        return G_SOURCE_REMOVE;
+    }
+
+    size_t count = app->filter_indices->len;
+    size_t chunk_size = 200;
+    size_t end = app->list_populate_offset + chunk_size;
+    if (end > count) end = count;
+
+    for (size_t i = app->list_populate_offset; i < end; i++) {
+        size_t pos = g_array_index(app->filter_indices, size_t, i);
+        const FlatTreeEntry *e = flat_index_get(fi, pos);
+        if (!e) continue;
+
+        char *word = g_strndup(fi->mmap_data + e->h_off, e->h_len);
+        GtkWidget *row = gtk_list_box_row_new();
+        GtkWidget *lbl = gtk_label_new(word);
+        gtk_label_set_xalign(GTK_LABEL(lbl), 0);
+        gtk_widget_set_margin_start(lbl, 12); gtk_widget_set_margin_end(lbl, 12);
+        gtk_widget_set_margin_top(lbl, 8);    gtk_widget_set_margin_bottom(lbl, 8);
+        gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), lbl);
+        g_object_set_data_full(G_OBJECT(row), "word", word, g_free);
+        gtk_list_box_append(app->list, row);
+    }
+
+    app->list_populate_offset = end;
+
+    if (app->list_populate_offset >= count) {
+        app->list_idle_id = 0;
+        return G_SOURCE_REMOVE;
+    }
+
+    return G_SOURCE_CONTINUE;
+}
+
 static void rebuild_list(AppState *app) {
+    if (app->list_idle_id) {
+        g_source_remove(app->list_idle_id);
+        app->list_idle_id = 0;
+    }
     /* Remove old rows */
     for (;;) {
         GtkWidget *ch = gtk_widget_get_first_child(GTK_WIDGET(app->list));
@@ -486,10 +567,10 @@ static void rebuild_list(AppState *app) {
 
     if (q && q[0] && app->fts_enabled) {
         /* FTS query */
-        GArray *candidates = dict_fts_query_candidates(htm_dict_zip_path(d), q, 0, 500);
+        GArray *candidates = dict_fts_query_candidates(htm_dict_zip_path(d), q, 0, 5000);
         if (candidates) {
             fts_hit = TRUE;
-            for (guint i = 0; i < candidates->len && i < 300; i++) {
+            for (guint i = 0; i < candidates->len; i++) {
                 guint32 eid = g_array_index(candidates, guint32, i);
                 size_t  pos = (size_t)eid;
                 g_array_append_val(app->filter_indices, pos);
@@ -502,17 +583,15 @@ static void rebuild_list(AppState *app) {
         /* Prefix/substring search via FlatIndex */
         size_t total = flat_index_count(fi);
         if (!q || !q[0]) {
-            /* No query — show first 300 */
-            guint limit = (guint)(total < 300 ? total : 300);
-            for (guint i = 0; i < limit; i++) {
-                size_t pos = (size_t)i;
-                g_array_append_val(app->filter_indices, pos);
+            /* No query — show all (streamed) */
+            for (size_t i = 0; i < total; i++) {
+                g_array_append_val(app->filter_indices, i);
             }
         } else {
             /* Try prefix search first */
             size_t start = flat_index_search_prefix(fi, q);
             if (start != (size_t)-1) {
-                for (size_t i = start; i < total && app->filter_indices->len < 300; i++) {
+                for (size_t i = start; i < total; i++) {
                     const FlatTreeEntry *e = flat_index_get(fi, i);
                     if (!flat_index_entry_matches_prefix(fi->mmap_data, e, q, strlen(q)))
                         break;
@@ -520,48 +599,47 @@ static void rebuild_list(AppState *app) {
                 }
             }
             
-            /* case-insensitive substring scan — capped at 300 */
-            if (app->filter_indices->len < 300) {
-                char *nd = g_utf8_strdown(q, -1);
-                for (size_t i = 0; i < total && app->filter_indices->len < 300; i++) {
-                    /* Avoid duplicates */
+            /* case-insensitive substring scan */
+            char *nd = g_utf8_strdown(q, -1);
+            for (size_t i = 0; i < total; i++) {
+                /* Avoid duplicates if prefix search already caught it */
+                if (start != (size_t)-1) {
+                   /* Simple optimization: if i is in the prefix range, skip */
+                }
+                
+                /* Simple check: if prefix range is [start, some_end), we check if i is in it.
+                   But for simplicity, let's just use a hash table for duplicates if query is long, 
+                   or just clear the array and redo. */
+                
+                const FlatTreeEntry *e = flat_index_get(fi, i);
+                if (!e) continue;
+                const char *hw  = fi->mmap_data + e->h_off;
+                char       *hwl = g_utf8_strdown(hw, (gssize)e->h_len);
+                if (strstr(hwl, nd)) {
+                    /* Check if already added via prefix */
                     gboolean already = FALSE;
-                    for (guint j = 0; j < app->filter_indices->len; j++) {
-                        if (g_array_index(app->filter_indices, size_t, j) == i) {
-                            already = TRUE; break;
+                    if (start != (size_t)-1) {
+                        for (guint j = 0; j < app->filter_indices->len; j++) {
+                            if (g_array_index(app->filter_indices, size_t, j) == i) {
+                                already = TRUE; break;
+                            }
                         }
                     }
-                    if (already) continue;
-
-                    const FlatTreeEntry *e = flat_index_get(fi, i);
-                    if (!e) continue;
-                    const char *hw  = fi->mmap_data + e->h_off;
-                    char       *hwl = g_utf8_strdown(hw, (gssize)e->h_len);
-                    if (strstr(hwl, nd))
-                        g_array_append_val(app->filter_indices, i);
-                    g_free(hwl);
+                    if (!already) g_array_append_val(app->filter_indices, i);
                 }
-                g_free(nd);
+                g_free(hwl);
+                
+                /* Cap search results at 5000 for sanity */
+                if (app->filter_indices->len >= 5000) break;
             }
+            g_free(nd);
         }
     }
     g_free(q);
 
-    /* Populate list box */
-    for (guint i = 0; i < app->filter_indices->len; i++) {
-        size_t               pos = g_array_index(app->filter_indices, size_t, i);
-        const FlatTreeEntry *e   = flat_index_get(fi, pos);
-        if (!e) continue;
-        char *word = g_strndup(fi->mmap_data + e->h_off, e->h_len);
-        GtkWidget *row = gtk_list_box_row_new();
-        GtkWidget *lbl = gtk_label_new(word);
-        gtk_label_set_xalign(GTK_LABEL(lbl), 0);
-        gtk_widget_set_margin_start(lbl, 12); gtk_widget_set_margin_end(lbl, 12);
-        gtk_widget_set_margin_top(lbl, 8);    gtk_widget_set_margin_bottom(lbl, 8);
-        gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), lbl);
-        g_object_set_data_full(G_OBJECT(row), "word", word, g_free);
-        gtk_list_box_append(app->list, row);
-    }
+    /* Start idle population */
+    app->list_populate_offset = 0;
+    app->list_idle_id = g_idle_add(populate_list_idle, app);
 }
 
 static void on_search_changed(GtkSearchEntry *e, gpointer ud) {
@@ -777,9 +855,15 @@ static void app_activate(GtkApplication *gtk_app, gpointer ud) {
     app->webview = WEBKIT_WEB_VIEW(webkit_web_view_new());
     WebKitWebContext *ctx = webkit_web_view_get_context(app->webview);
     webkit_web_context_register_uri_scheme(ctx, "htmdict", scheme_request_cb, app, NULL);
+    webkit_web_context_register_uri_scheme(ctx, "media", scheme_request_cb, app, NULL);
+    webkit_web_context_register_uri_scheme(ctx, "sound", scheme_request_cb, app, NULL);
     WebKitSecurityManager *sm = webkit_web_context_get_security_manager(ctx);
     webkit_security_manager_register_uri_scheme_as_local(sm, "htmdict");
+    webkit_security_manager_register_uri_scheme_as_local(sm, "media");
+    webkit_security_manager_register_uri_scheme_as_local(sm, "sound");
     webkit_security_manager_register_uri_scheme_as_cors_enabled(sm, "htmdict");
+    webkit_security_manager_register_uri_scheme_as_cors_enabled(sm, "media");
+    webkit_security_manager_register_uri_scheme_as_cors_enabled(sm, "sound");
     {
         char *blank = build_page(app, "");
         webkit_web_view_load_html(app->webview, blank, "about:blank");
@@ -828,6 +912,7 @@ static void app_state_free(gpointer p) {
     g_ptr_array_unref(app->dicts);
     g_array_unref(app->filter_indices);
     g_free(app->last_loaded_word);
+    if (app->list_idle_id) g_source_remove(app->list_idle_id);
     g_free(app);
 }
 

@@ -13,6 +13,7 @@ endif
 zlib_dep = dependency('zlib')
 
 sqlite3_dep = dependency('sqlite3')
+json_dep = dependency('json-glib-1.0')
 
 srcs = [
   'src/dict-cache.c',
@@ -26,6 +27,6 @@ srcs = [
 
 executable('htmdict', srcs,
   include_directories: include_directories('src'),
-  dependencies: [gtk_dep, adw_dep, webkit_dep, zlib_dep, sqlite3_dep],
+  dependencies: [gtk_dep, adw_dep, webkit_dep, zlib_dep, sqlite3_dep, json_dep],
   install: true,
 )

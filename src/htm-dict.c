@@ -12,6 +12,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <errno.h>
+#include <json-glib/json-glib.h>
 
 /* ────────────────────────────────────────────────────────────── */
 /*  Private types                                                  */
@@ -31,6 +32,7 @@ struct HtmDict {
     char *contents_lang;
     char *html_entry;
     char *resource_prefix;
+    char *stylesheet;
 
     ZipMmap         *zip;
     const uint8_t   *html_base;
@@ -58,6 +60,7 @@ const char *htm_dict_display_name(HtmDict *d)   { return d && d->display_name ? 
 const char *htm_dict_index_lang(HtmDict *d)     { return d && d->index_lang   ? d->index_lang   : "Unknown"; }
 const char *htm_dict_contents_lang(HtmDict *d)  { return d && d->contents_lang? d->contents_lang: "Unknown"; }
 const char *htm_dict_resource_prefix(HtmDict *d){ return d && d->resource_prefix? d->resource_prefix : ""; }
+const char *htm_dict_stylesheet(HtmDict *d)     { return d && d->stylesheet      ? d->stylesheet      : ""; }
 ZipMmap    *htm_dict_peek_zip(HtmDict *d)        { return d ? d->zip : NULL; }
 FlatIndex  *htm_dict_get_flat_index(HtmDict *d)  { return d ? d->flat_index : NULL; }
 
@@ -104,6 +107,62 @@ static char *resource_prefix_from_html_entry(const char *html_entry) {
     const char *slash = strrchr(html_entry, '/');
     if (!slash) return g_strdup("");
     return g_strndup(html_entry, (gsize)(slash - html_entry + 1));
+}
+
+static gboolean parse_meta_json(HtmDict *d, const char *json_path, GError **error) {
+    const ZipEntry *ze = zip_mmap_lookup(d->zip, json_path);
+    if (!ze) return FALSE;
+
+    size_t len = 0;
+    uint8_t *data = zip_mmap_read_entry(d->zip, ze, &len, error);
+    if (!data) return FALSE;
+
+    JsonParser *parser = json_parser_new();
+    if (!json_parser_load_from_data(parser, (const char *)data, (gssize)len, error)) {
+        g_free(data);
+        g_object_unref(parser);
+        return FALSE;
+    }
+
+    JsonNode *root = json_parser_get_root(parser);
+    if (JSON_NODE_HOLDS_OBJECT(root)) {
+        JsonObject *obj = json_node_get_object(root);
+        if (json_object_has_member(obj, "name")) {
+            g_free(d->display_name);
+            d->display_name = g_strdup(json_object_get_string_member(obj, "name"));
+        }
+        if (json_object_has_member(obj, "stylesheet")) {
+            g_free(d->stylesheet);
+            d->stylesheet = g_strdup(json_object_get_string_member(obj, "stylesheet"));
+        }
+        if (json_object_has_member(obj, "html")) {
+            g_free(d->html_entry);
+            const char *html_val = json_object_get_string_member(obj, "html");
+            /* html path in meta.json is relative to the dictionary root (the folder containing meta.json) */
+            char *dir = g_path_get_dirname(json_path);
+            if (g_strcmp0(dir, ".") == 0) d->html_entry = g_strdup(html_val);
+            else                          d->html_entry = g_build_filename(dir, html_val, NULL);
+            g_free(dir);
+        }
+        if (json_object_has_member(obj, "index_languages")) {
+            JsonArray *arr = json_object_get_array_member(obj, "index_languages");
+            if (json_array_get_length(arr) > 0) {
+                g_free(d->index_lang);
+                d->index_lang = g_strdup(json_array_get_string_element(arr, 0));
+            }
+        }
+        if (json_object_has_member(obj, "content_languages")) {
+            JsonArray *arr = json_object_get_array_member(obj, "content_languages");
+            if (json_array_get_length(arr) > 0) {
+                g_free(d->contents_lang);
+                d->contents_lang = g_strdup(json_array_get_string_element(arr, 0));
+            }
+        }
+    }
+
+    g_object_unref(parser);
+    g_free(data);
+    return TRUE;
 }
 
 /* ────────────────────────────────────────────────────────────── */
@@ -177,19 +236,6 @@ static gboolean ensure_sidecar_html(HtmDict *d, const ZipEntry *he, GError **err
 
 typedef enum { S_META, S_HTML } ScanState;
 
-static void parse_meta_line(const char *line, HtmDict *d) {
-    if (line[0] != '#') return;
-    const char *keys[]  = { "#NAME", "#INDEX_LANGUAGE", "#CONTENTS_LANGUAGE" };
-    char      **fields[] = { &d->display_name, &d->index_lang, &d->contents_lang };
-    for (int k = 0; k < 3; k++) {
-        if (!g_str_has_prefix(line, keys[k])) continue;
-        const char *q = strstr(line, "\""); if (!q) return; q++;
-        const char *end = strrchr(q, '"');  if (!end || end <= q) return;
-        g_free(*fields[k]);
-        *fields[k] = g_strndup(q, (gsize)(end - q));
-        return;
-    }
-}
 
 /* ────────────────────────────────────────────────────────────── */
 /*  Index builder                                                  */
@@ -274,45 +320,54 @@ static gboolean htm_build_index(HtmDict *d, const uint8_t *buf, size_t size, GEr
     GPtrArray *tmps = g_ptr_array_new_with_free_func(tmp_entry_free);
 
     while (pos < size) {
-        size_t line_start = pos;
-        while (pos < size && buf[pos] != '\n' && buf[pos] != '\r')
-            pos++;
-        size_t line_end = pos;
-        char  *line     = g_strndup((const char *)(buf + line_start), line_end - line_start);
-        while (pos < size && (buf[pos] == '\n' || buf[pos] == '\r'))
-            pos++;
-
-        char *trim = g_strstrip(line);
-
         if (state == S_META) {
-            if (trim[0] == '#') {
-                parse_meta_line(trim, d);
-            } else if (trim[0]) {
-                g_free(current_word);
-                current_word = g_strdup(trim);
-                state      = S_HTML;
-                html_start = (guint64)pos;
+            /* Look for <article id="... */
+            const char *p = (const char *)(buf + pos);
+            const char *start = strstr(p, "<article");
+            if (!start) break;
+            
+            const char *id_attr = strstr(start, "id=\"");
+            if (!id_attr) {
+                pos = (size_t)(start - (const char *)buf) + 8;
+                continue;
             }
+            id_attr += 4;
+            const char *id_end = strchr(id_attr, '"');
+            if (!id_end) {
+                pos = (size_t)(id_attr - (const char *)buf);
+                continue;
+            }
+            
+            g_free(current_word);
+            current_word = g_strndup(id_attr, (gsize)(id_end - id_attr));
+            
+            /* Move pos past the opening <article ... > */
+            const char *tag_end = strchr(id_end, '>');
+            if (!tag_end) {
+                pos = (size_t)(id_end - (const char *)buf);
+                continue;
+            }
+            html_start = (guint64)(start - (const char *)buf); /* Start including the tag */
+            state = S_HTML;
+            pos = (size_t)(tag_end + 1 - (const char *)buf);
         } else {
-            if (strcmp(trim, "</>") == 0) {
-                guint64 html_end = (guint64)line_start;
-                if (current_word && html_end > html_start) {
-                    if (html_end - html_start > G_MAXUINT32) {
-                        g_free(current_word); g_free(line);
-                        g_ptr_array_unref(tmps);
-                        g_set_error(error, G_FILE_ERROR, G_FILE_ERROR_FAILED, "entry too large");
-                        return FALSE;
-                    }
-                    TmpEntry *e = g_new(TmpEntry, 1);
-                    e->word = g_strdup(current_word);
-                    e->off  = html_start;
-                    e->len  = (guint32)(html_end - html_start);
-                    g_ptr_array_add(tmps, e);
-                }
-                state = S_META;
+            /* Look for </article> */
+            const char *p = (const char *)(buf + pos);
+            const char *end = strstr(p, "</article>");
+            if (!end) break;
+            
+            guint64 html_end = (guint64)(end + 10 - (const char *)buf); /* Include </article> */
+            
+            if (current_word) {
+                TmpEntry *e = g_new(TmpEntry, 1);
+                e->word = g_strdup(current_word);
+                e->off  = html_start;
+                e->len  = (guint32)(html_end - html_start);
+                g_ptr_array_add(tmps, e);
             }
+            state = S_META;
+            pos = (size_t)(end + 10 - (const char *)buf);
         }
-        g_free(line);
     }
     g_free(current_word);
 
@@ -383,6 +438,7 @@ void htm_dict_close(HtmDict *d) {
     g_free(d->contents_lang);
     g_free(d->html_entry);
     g_free(d->resource_prefix);
+    g_free(d->stylesheet);
     zip_mmap_close(d->zip);
     if (d->sidecar_map && d->sidecar_size)
         munmap(d->sidecar_map, d->sidecar_size);
@@ -418,7 +474,28 @@ HtmDict *htm_dict_open(const char *zip_path, GError **error) {
         return NULL;
     }
 
-    d->html_entry = discover_html_entry(d->zip, zip_path);
+    /* 1. Try to find meta.json */
+    GPtrArray *names = zip_mmap_list_names(d->zip);
+    char *meta_path = NULL;
+    for (guint i = 0; names && i < names->len; i++) {
+        const char *n = g_ptr_array_index(names, i);
+        if (g_str_has_suffix(n, "meta.json")) {
+            meta_path = g_strdup(n);
+            break;
+        }
+    }
+
+    if (meta_path) {
+        if (!parse_meta_json(d, meta_path, error)) {
+            g_free(meta_path);
+            htm_dict_close(d);
+            return NULL;
+        }
+        g_free(meta_path);
+    } else {
+        d->html_entry = discover_html_entry(d->zip, zip_path);
+    }
+
     if (!d->html_entry) {
         g_set_error(error, G_FILE_ERROR, G_FILE_ERROR_FAILED, "no suitable .html inside zip");
         htm_dict_close(d);
@@ -427,7 +504,7 @@ HtmDict *htm_dict_open(const char *zip_path, GError **error) {
 
     const ZipEntry *he = zip_mmap_lookup(d->zip, d->html_entry);
     if (!he) {
-        g_set_error(error, G_FILE_ERROR, G_FILE_ERROR_FAILED, "html entry missing");
+        g_set_error(error, G_FILE_ERROR, G_FILE_ERROR_FAILED, "html entry missing: %s", d->html_entry);
         htm_dict_close(d);
         return NULL;
     }
@@ -452,29 +529,11 @@ HtmDict *htm_dict_open(const char *zip_path, GError **error) {
         }
     }
 
-    /* Default metadata */
+    /* Default metadata if still missing */
     if (!d->display_name) d->display_name  = g_strdup(d->html_entry);
     if (!d->index_lang)   d->index_lang    = g_strdup("Unknown");
     if (!d->contents_lang)d->contents_lang = g_strdup("Unknown");
 
-    /* Parse display_name etc. from the HTML buffer before building index */
-    {
-        const uint8_t *buf = d->html_base;
-        size_t size        = d->html_size;
-        size_t pos         = 0;
-        /* Only scan the first 4 KB for meta lines */
-        size_t scan_limit  = (size < 4096) ? size : 4096;
-        while (pos < scan_limit) {
-            size_t ls = pos;
-            while (pos < scan_limit && buf[pos] != '\n' && buf[pos] != '\r') pos++;
-            char *line = g_strndup((const char *)(buf + ls), pos - ls);
-            while (pos < scan_limit && (buf[pos] == '\n' || buf[pos] == '\r')) pos++;
-            char *trim = g_strstrip(line);
-            if (trim[0] == '#') parse_meta_line(trim, d);
-            else if (trim[0])   { g_free(line); break; } /* first headword: stop */
-            g_free(line);
-        }
-    }
 
     /* Build flat index if not present */
     if (!g_file_test(d->flat_path, G_FILE_TEST_EXISTS)) {

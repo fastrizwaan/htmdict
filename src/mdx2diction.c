@@ -51,21 +51,21 @@ static char *extract_link_target(const uint8_t *data, size_t len) {
 static void mdx_entry_callback(const char *key, const uint8_t *data, size_t len, gpointer user_data) {
     EntryContext *ctx = user_data;
 
-    write_entry_open(ctx->out, key);
     if (len >= 8 && strncmp((const char *)data, "@@@LINK=", 8) == 0) {
+        /* Cross-reference entry — generate our own markup */
+        write_entry_open(ctx->out, key);
         char *target = extract_link_target(data, len);
         fputs("  <section class=\"cross-reference\">\n    <a href=\"entry://", ctx->out);
         diction_print_html_attr(ctx->out, target);
         fputs("\">", ctx->out);
         diction_print_html_text(ctx->out, target);
-        fputs("</a>\n  </section>\n", ctx->out);
+        fputs("</a>\n  </section>\n</article>\n\n", ctx->out);
         g_free(target);
     } else {
-        fputs("  <section class=\"definitions\">\n", ctx->out);
-        diction_print_normalized_fragment(ctx->out, data, len);
-        fputs("\n  </section>\n", ctx->out);
+        /* MDX entries are already standard HTML — write verbatim */
+        fwrite(data, 1, len, ctx->out);
+        fputc('\n', ctx->out);
     }
-    fputs("</article>\n\n", ctx->out);
 }
 
 static void mdd_resource_callback(const char *key, const uint8_t *data, size_t len, gpointer user_data) {

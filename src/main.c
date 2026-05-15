@@ -34,6 +34,7 @@ typedef struct {
     GtkProgressBar  *progress_bar;
     GtkLabel        *progress_label;
     GtkButton       *theme_toggle;
+    guint            activated_pos;  /* position of last activated headword row */
 } AppState;
 
 typedef struct {
@@ -625,6 +626,7 @@ static gboolean policy_decide_cb(WebKitWebView *wv, WebKitPolicyDecision *decisi
 static void rebuild_list(AppState *app) {
     g_array_set_size(app->filter_indices, 0);
     app->filter_active = FALSE;
+    app->activated_pos = GTK_INVALID_LIST_POSITION;
 
     HtmDict    *d = app_active_dict(app);
     FlatIndex  *fi = d ? htm_dict_get_flat_index(d) : NULL;
@@ -719,9 +721,17 @@ static void on_search_changed(GtkSearchEntry *e, gpointer ud) {
 static void on_list_item_activated(GtkListView *view, guint position, gpointer ud) {
     (void)view;
     AppState *app = ud;
+    guint old_pos = app->activated_pos;
+    app->activated_pos = position;
     char *word = headword_model_dup_word_at(app->headword_model, position);
     if (word) load_word(app, word);
     g_free(word);
+    /* Rebind old and new rows to update hw-selected CSS class */
+    guint n = g_list_model_get_n_items(G_LIST_MODEL(app->headword_model));
+    if (old_pos != GTK_INVALID_LIST_POSITION && old_pos < n && old_pos != position)
+        g_list_model_items_changed(G_LIST_MODEL(app->headword_model), old_pos, 1, 1);
+    if (position < n)
+        g_list_model_items_changed(G_LIST_MODEL(app->headword_model), position, 1, 1);
 }
 
 static void on_dict_selected(GObject *obj, GParamSpec *pspec, gpointer ud) {
@@ -780,6 +790,7 @@ static void headword_factory_setup(GtkListItemFactory *factory, GtkListItem *ite
     GtkWidget *lbl = gtk_label_new(NULL);
     gtk_label_set_xalign(GTK_LABEL(lbl), 0);
     gtk_label_set_ellipsize(GTK_LABEL(lbl), PANGO_ELLIPSIZE_END);
+    gtk_widget_set_hexpand(lbl, TRUE);
     gtk_widget_set_margin_start(lbl, 12);
     gtk_widget_set_margin_end(lbl, 12);
     gtk_widget_set_margin_top(lbl, 8);
@@ -789,10 +800,27 @@ static void headword_factory_setup(GtkListItemFactory *factory, GtkListItem *ite
 
 static void headword_factory_bind(GtkListItemFactory *factory, GtkListItem *item, gpointer ud) {
     (void)factory;
-    (void)ud;
+    AppState *app = ud;
     GtkStringObject *obj = gtk_list_item_get_item(item);
     GtkWidget *lbl = gtk_list_item_get_child(item);
+    GtkWidget *row = gtk_widget_get_parent(lbl);
     gtk_label_set_text(GTK_LABEL(lbl), obj ? gtk_string_object_get_string(obj) : "");
+    /* Apply highlight to the row widget so it fills the full row width */
+    if (row) {
+        if (gtk_list_item_get_position(item) == app->activated_pos)
+            gtk_widget_add_css_class(row, "hw-selected");
+        else
+            gtk_widget_remove_css_class(row, "hw-selected");
+    }
+}
+
+static void headword_factory_unbind(GtkListItemFactory *factory, GtkListItem *item, gpointer ud) {
+    (void)factory;
+    (void)ud;
+    GtkWidget *lbl = gtk_list_item_get_child(item);
+    GtkWidget *row = gtk_widget_get_parent(lbl);
+    if (row)
+        gtk_widget_remove_css_class(row, "hw-selected");
 }
 
 /* ── dict discovery ────────────────────────────────────────────── */
@@ -839,6 +867,7 @@ static void app_activate(GtkApplication *gtk_app, gpointer ud) {
     app->filter_indices   = g_array_new(FALSE, FALSE, sizeof(size_t));
     app->filter_active    = FALSE;
     app->fts_enabled      = FALSE;
+    app->activated_pos    = GTK_INVALID_LIST_POSITION;
     app->style_mgr        = adw_style_manager_get_default();
     load_config(app);
     app->is_dark          = adw_style_manager_get_dark(app->style_mgr);
@@ -932,9 +961,36 @@ static void app_activate(GtkApplication *gtk_app, gpointer ud) {
 
     app->headword_model = headword_model_new(app);
     app->selection = GTK_SINGLE_SELECTION(gtk_single_selection_new(G_LIST_MODEL(g_object_ref(app->headword_model))));
+    /* CSS: soft light-blue for activated row; grey only while actually hovering */
+    GtkCssProvider *hw_css = gtk_css_provider_new();
+    gtk_css_provider_load_from_string(hw_css,
+        /* :selected persists after mouse-leave - clear it first (lower priority) */
+        "listview > row:selected:not(.hw-selected) {"
+        "  background-color: transparent;"
+        "  color: inherit;"
+        "}"
+        /* :hover comes AFTER :selected - wins when both are true (equal specificity, last wins) */
+        "listview > row:hover:not(.hw-selected) {"
+        "  background-color: rgba(128,128,128,0.12);"
+        "  color: inherit;"
+        "}"
+        /* Our click highlight - soft light-blue tint, always on, dark text */
+        "listview > row.hw-selected,"
+        "listview > row.hw-selected:hover,"
+        "listview > row.hw-selected:selected {"
+        "  background-color: alpha(@accent_bg_color, 0.22);"
+        "  color: inherit;"
+        "}");
+    gtk_style_context_add_provider_for_display(
+        gdk_display_get_default(),
+        GTK_STYLE_PROVIDER(hw_css),
+        GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+    g_object_unref(hw_css);
+
     GtkListItemFactory *factory = gtk_signal_list_item_factory_new();
-    g_signal_connect(factory, "setup", G_CALLBACK(headword_factory_setup), app);
-    g_signal_connect(factory, "bind", G_CALLBACK(headword_factory_bind), app);
+    g_signal_connect(factory, "setup",   G_CALLBACK(headword_factory_setup),   app);
+    g_signal_connect(factory, "bind",    G_CALLBACK(headword_factory_bind),    app);
+    g_signal_connect(factory, "unbind",  G_CALLBACK(headword_factory_unbind),  app);
     app->list_view = GTK_LIST_VIEW(gtk_list_view_new(GTK_SELECTION_MODEL(g_object_ref(app->selection)), factory));
     gtk_list_view_set_single_click_activate(app->list_view, TRUE);
     g_signal_connect(app->list_view, "activate", G_CALLBACK(on_list_item_activated), app);

@@ -328,7 +328,7 @@ static const char *theme_css(gboolean dark) {
                ".entry-card { position: relative; border: 1px solid #3a3a3a; border-radius: 8px; padding: 18px; background: #242424; } "
                ".entry-card article.entry { margin: 0; padding: 0 !important; border: 0 !important; background: transparent !important; } "
                ".headword-row { display: block; height: 0; margin: 0; padding: 0; overflow: visible; } "
-               ".dict-name { position: absolute; top: 18px; right: 18px; font-size: 0.95rem; opacity: 0.78; } "
+               ".dict-name { position: absolute; top: 26px; right: 18px; font-size: 0.95rem; opacity: 0.78; } "
                "headword { display: block; margin: 0 0 0.55rem; font-size: 2rem; line-height: 1.15; font-weight: 700; color: #ef6b6b; padding-right: 180px; } "
                "article.entry:has(headword) h1.headword { display: none; } "
                "font[color], span[style*='color'], div[style*='color'], p[style*='color'] { color: inherit !important; } "
@@ -339,7 +339,7 @@ static const char *theme_css(gboolean dark) {
                ".entry-card { position: relative; border: 1px solid #d0d0d0; border-radius: 8px; padding: 18px; background: #f7f7f7; } "
                ".entry-card article.entry { margin: 0; padding: 0 !important; border: 0 !important; background: transparent !important; } "
                ".headword-row { display: block; height: 0; margin: 0; padding: 0; overflow: visible; } "
-               ".dict-name { position: absolute; top: 18px; right: 18px; font-size: 0.95rem; opacity: 0.72; } "
+               ".dict-name { position: absolute; top: 26px; right: 18px; font-size: 0.95rem; opacity: 0.72; } "
                "headword { display: block; margin: 0 0 0.55rem; font-size: 2rem; line-height: 1.15; font-weight: 700; color: #9f2323; padding-right: 180px; } "
                "article.entry:has(headword) h1.headword { display: none; } "
                "a { color: #0066cc !important; }";

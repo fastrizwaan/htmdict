@@ -1,6 +1,6 @@
 # Diction Specification 1.0
 
-Version: 1.0
+Version: 1.0  
 Status: Final Specification
 
 ---
@@ -44,6 +44,7 @@ Status: Final Specification
 35. Reference Python Converter
 36. Compliance Checklist
 37. Versioning and Forward Compatibility
+38. Non‑Normative Grammar (Informative)
 
 ---
 
@@ -68,7 +69,7 @@ A `.diction` package is:
 - a semantic fragment stream
 - an interchange representation
 
-A `.diction` package is NOT:
+A `.diction` package is **NOT**:
 
 - a standalone browser document
 - a self-contained web application
@@ -105,7 +106,7 @@ They intentionally omit:
 
 Diction is optimized for sequential tokenization and external indexing.
 
-External indexes (byte-offset tables, sorted key arrays) are built by the runtime application from the fragment stream and stored in an application-managed cache. They are not bundled inside the `.diction` package. This mirrors the approach used by established dictionary runtimes such as GoldenDict and Lingvo, where index files are generated on first load and cached externally keyed by file path and modification time.
+External indexes (byte‑offset tables, sorted key arrays) are built by the runtime application from the fragment stream and stored in an application‑managed cache. They are not bundled inside the `.diction` package. This mirrors the approach used by established dictionary runtimes such as GoldenDict and Lingvo, where index files are generated on first load and cached externally keyed by file path and modification time.
 
 ## 2.5 Unicode-First
 
@@ -149,13 +150,22 @@ Oxford.diction
 
 Applications SHOULD treat `.diction` as a semantic package type.
 
-## 4.1 Recommended MIME Types
+## 4.1 Canonical MIME Type
+
+The canonical MIME type for Diction packages is:
+
+```text
+application/diction+zip
+```
+
+Alternative MIME types MAY be recognized for compatibility purposes:
 
 ```text
 text/diction
 text/html+diction
-application/diction+zip
 ```
+
+Applications SHOULD emit `application/diction+zip` when serving or exporting Diction packages.
 
 ---
 
@@ -174,8 +184,9 @@ Oxford.diction
 Rules:
 
 - `meta.json` is REQUIRED
-- the HTML fragment file is REQUIRED
-- `style.css` is REQUIRED
+- the archive MUST contain exactly one top-level root directory
+- the HTML fragment file named by `meta.json` `"html"` is REQUIRED
+- the CSS stylesheet named by `meta.json` `"stylesheet"` is REQUIRED
 - `media/` is OPTIONAL
 - `fonts/` is OPTIONAL
 
@@ -186,8 +197,8 @@ Rules:
 | File | Purpose |
 |---|---|
 | `meta.json` | Package metadata |
-| `*.html` | Fragment stream source |
-| `style.css` | External rendering stylesheet |
+| file named by `meta.json` `"html"` | Fragment stream source |
+| file named by `meta.json` `"stylesheet"` | External rendering stylesheet |
 
 ---
 
@@ -237,6 +248,30 @@ ar
 ur
 ```
 
+## 7.2 Metadata Extension Rules
+
+Applications MUST ignore unknown metadata fields.
+
+Custom metadata extensions SHOULD use the `x-` prefix.
+
+Example:
+
+```json
+{
+  "x-build-id": "nightly-2026-05-17",
+  "x-authoring-tool": "Diction Builder"
+}
+```
+
+Applications MUST NOT fail when unknown extension fields are encountered.
+
+Reserved future metadata namespaces:
+
+| Prefix | Reserved For |
+|---|---|
+| `x-` | Vendor/private extensions |
+| `sys-` | Future specification-defined system fields |
+
 ---
 
 # 8. Fragment Stream Model
@@ -259,6 +294,20 @@ Example:
   <headword>apple</headword>
   <definition>A fruit.</definition>
 </article>
+```
+
+## 8.1 Fragment Stream Encoding
+
+All textual files inside a `.diction` package MUST use UTF-8 encoding.
+
+Applications SHOULD reject malformed UTF-8 byte sequences.
+
+Applications MAY replace malformed sequences with U+FFFD replacement characters during recovery mode.
+
+Recommended normalization form:
+
+```text
+Unicode NFC
 ```
 
 ---
@@ -306,11 +355,43 @@ Within `<article class="entry">`, elements SHOULD appear in this order when pres
 
 This order is a recommendation, not a requirement. Applications MUST NOT depend on element order within an entry.
 
+## 9.2 Entry Identity
+
+Applications MAY assign internal stable identifiers to entries during indexing.
+
+Future versions MAY standardize:
+
+```html
+<article class="entry" id="entry-123">
+```
+
+Applications MUST ignore unknown attributes attached to entry containers.
+
+## 9.3 Entry Boundary Rules [NEW]
+
+`<article class="entry">` is the canonical lexical entry container.
+
+- Entry containers MUST NOT be nested.
+- Applications MAY assume that entry containers form a flat top‑level sequence within the fragment stream.
+- Non‑entry structural content (e.g., comments, headers) MAY appear between entries, but applications SHOULD ignore such content during lexical indexing unless explicitly configured otherwise.
+
+These rules guarantee deterministic stream tokenization, byte‑offset indexing, and recovery after corruption.
+
+## 9.4 Duplicate Headwords [NEW]
+
+Real dictionaries often contain multiple entries with the same canonical headword (e.g., `light` as noun, verb, adjective).
+
+- Applications MUST allow multiple entries sharing the same canonical lookup key.
+- Result ordering when multiple entries match is **implementation‑defined**.
+- Applications SHOULD provide a way to present all matching entries (e.g., grouped by part of speech, or in source order).
+
+This prevents implementers from incorrectly assuming key uniqueness.
+
 ---
 
 # 10. Headwords
 
-The visible text content of `<headword>` defines the canonical key.
+The visible text content of `<headword>` defines the canonical key after normalization.
 
 ```html
 <headword>apple pie</headword>
@@ -338,6 +419,26 @@ Indexed as:
 H2O
 ```
 
+## 10.1 Canonical Key Normalization [NEW]
+
+To ensure deterministic lookup keys, applications MUST first extract the visible text content of `<headword>` by ignoring markup, then normalize that text as follows before indexing or comparing:
+
+1. **Whitespace normalization**:
+   - Replace any sequence of whitespace characters (including tabs, newlines, non‑breaking spaces) with a single U+0020 SPACE.
+   - Strip leading and trailing whitespace.
+2. **Remove zero‑width formatting characters** (e.g., U+200B, U+200C, U+200D) unless they carry semantic weight (which is rare for headwords).
+3. **Unicode NFC normalization** (as per section 8.1).
+
+Example:
+
+```html
+<headword>  café  <em>house</em>  </headword>
+```
+
+Normalized key: `"café house"`
+
+This prevents identical‑looking headwords from hashing differently.
+
 ---
 
 # 11. Aliases
@@ -360,6 +461,18 @@ Multiple aliases are permitted:
 <alias>gonna</alias>
 <alias>going to (future)</alias>
 ```
+
+## 11.1 Alias Types (Future Extensibility) [NEW]
+
+Currently `<alias>` does not distinguish between spelling variants (`color`/`colour`), synonyms (`car`/`automobile`), or abbreviations (`Dr`/`Doctor`). Future versions MAY introduce a `type` attribute:
+
+```html
+<alias type="spelling">color</alias>
+<alias type="synonym">automobile</alias>
+<alias type="abbrev">Dr</alias>
+```
+
+For Diction 1.0, applications SHOULD treat all aliases equivalently for lookup, but MAY store the `type` extension if present.
 
 ---
 
@@ -396,6 +509,15 @@ The `form` attribute SHOULD use a standardized grammatical label. Recommended va
 | `alternate` | Any other alternate spelling or form |
 
 Applications MAY support additional `form` values. Unknown `form` values MUST NOT cause errors; the surface form SHOULD still be indexed.
+
+Each `<inflection>` element SHOULD declare exactly one grammatical form value. If the same surface form has multiple grammatical roles, authors SHOULD repeat the `<inflection>` element rather than using a space-separated list.
+
+Example:
+
+```html
+<inflection form="past">lit</inflection>
+<inflection form="past-participle">lit</inflection>
+```
 
 ## 12.3 Indexing Behavior
 
@@ -505,14 +627,14 @@ Using `<sense>` allows applications to:
 </sense>
 ```
 
-The `n` attribute is a positive integer identifying the sense number within the entry. Sense numbers SHOULD be sequential starting from 1. Applications MUST NOT assume senses are contiguous or that `n` values are gapless after round-tripping through editors.
+The `n` attribute identifies the sense number within the entry. Top-level sense numbers SHOULD be positive integers starting from 1. Sub-senses MAY use dotted decimal notation such as `1.1` or `2.3.1`. Applications MUST NOT assume senses are contiguous or that `n` values are gapless after round‑tripping through editors.
 
 ## 13.3 Sense Attributes
 
 | Attribute | Required | Description |
 |---|---|---|
-| `n` | REQUIRED | Sense number (positive integer). |
-| `id` | OPTIONAL | Stable fragment identifier for deep-linking (e.g. `id="sense-1"`). |
+| `n` | REQUIRED | Sense number. Positive integer for top-level senses; dotted decimal notation MAY be used for sub-senses. |
+| `id` | OPTIONAL | Stable fragment identifier for deep‑linking (e.g. `id="sense-1"`). |
 | `domain` | OPTIONAL | Subject domain label (e.g. `"medicine"`, `"computing"`, `"law"`). |
 | `register` | OPTIONAL | Register or usage label (e.g. `"formal"`, `"informal"`, `"archaic"`, `"slang"`). |
 | `geo` | OPTIONAL | Geographic/dialect restriction (e.g. `"US"`, `"UK"`, `"AU"`). |
@@ -633,6 +755,20 @@ Applications SHOULD scroll or highlight the referenced sense when resolving such
 
   <etymology>From Latin <em>tigris</em>, from Greek <em>τίγρις</em>.</etymology>
 </article>
+```
+
+## 13.7 Sense Identifier Stability
+
+When `id` attributes are used on `<sense>` elements, they SHOULD remain stable across dictionary revisions whenever practical.
+
+Applications SHOULD prefer `id`-based deep linking over positional sense indexing.
+
+Authors SHOULD ensure that `id` attributes are unique within a package to avoid ambiguous fragment linking. If duplicate sense identifiers are encountered, applications SHOULD follow the error recovery behavior defined in section 26.1.
+
+Example:
+
+```html
+<sense n="2" id="finance-bank">
 ```
 
 ---
@@ -765,7 +901,7 @@ Pronunciation blocks SHOULD expose both readable phonetic text and accessible au
 </pronunciation>
 ```
 
-Applications SHOULD ensure pronunciation audio is keyboard-accessible and screen-reader accessible.
+Applications SHOULD ensure pronunciation audio is keyboard‑accessible and screen‑reader accessible.
 
 ---
 
@@ -833,13 +969,15 @@ Applications MUST normalize text using Unicode NFC before indexing or lookup.
 
 Applications MUST perform case-insensitive matching unless explicitly overridden.
 
+The required minimum behavior is Unicode-aware simple case folding. Applications MAY add locale-specific or expanded matching during query-time search.
+
 ## 19.1.3 Embedded Markup Stripping
 
 Applications MUST strip formatting markup when generating lookup keys.
 
 ## 19.1.4 Percent-Encoding Equivalence
 
-Applications MUST treat percent-encoded and non-percent-encoded lexical targets as equivalent during `entry://` resolution.
+Applications MUST treat percent‑encoded and non‑percent‑encoded lexical targets as equivalent during `entry://` resolution.
 
 Examples:
 
@@ -848,7 +986,7 @@ Examples:
 | `entry://apple pie` | `apple pie` |
 | `entry://apple%20pie` | `apple pie` |
 
-Applications SHOULD normalize percent-encoded sequences before lookup resolution.
+Applications SHOULD normalize percent‑encoded sequences before lookup resolution.
 
 ## 19.2 Optional Search Enhancements
 
@@ -857,11 +995,11 @@ Applications MAY implement:
 - accent-insensitive matching
 - locale-aware collation
 - fuzzy matching
-- Unicode-aware case folding
+- expanded Unicode case folding beyond the required simple case folding
 
 ## 19.3 Cross-Dictionary Resolution Behavior
 
-Applications SHOULD attempt to resolve cross-dictionary references using the dictionary identifier specified in the `entry://` target.
+Applications SHOULD attempt to resolve cross‑dictionary references using the dictionary identifier specified in the `entry://` target.
 
 **Behavior when target dictionary is available:**
 
@@ -869,13 +1007,13 @@ When the referenced dictionary is loaded and contains the target headword, appli
 
 **Behavior when target dictionary is unavailable:**
 
-Applications SHOULD display a clear, user-friendly fallback message:
+Applications SHOULD display a clear, user‑friendly fallback message:
 
 ```text
 Dictionary 'oald' not found.
 ```
 
-Applications MUST NOT crash, throw errors, or execute any script when a cross-dictionary link cannot be resolved.
+Applications MUST NOT crash, throw errors, or execute any script when a cross‑dictionary link cannot be resolved.
 
 ## 19.4 Media URI Schemes
 
@@ -886,7 +1024,14 @@ Diction defines URI schemes for media playback without requiring JavaScript:
 | `sound://` | Play an audio file | `sound://media/pronunciation.mp3` |
 | `video://` | Play a video file | `video://media/demonstration.mp4` |
 
-These schemes are application-handled. Applications MUST confine media path resolution to files within the `media/` directory of the package. Path components that traverse outside this directory (e.g. `../`, absolute paths) MUST be rejected.
+These schemes are application‑handled. For `sound://` and `video://`, the substring after the scheme prefix is interpreted as a package-relative media path after removing all leading `/` characters. Applications MUST NOT treat the `media` component as a network host or authority. Applications MUST confine media path resolution to files within the `media/` directory of the package. Path components that traverse outside this directory (e.g. `../`, absolute paths) MUST be rejected.
+
+The following forms are equivalent:
+
+```text
+sound://media/pronunciation.mp3
+sound:///media/pronunciation.mp3
+```
 
 ```html
 <a href="sound://media/apple.mp3">🔊</a>
@@ -905,6 +1050,23 @@ Standard `<audio>` and `<video>` elements MAY also be used directly:
 ```
 
 If an application does not support `sound://` or `video://`, it SHOULD display the link as plain text or ignore it gracefully. Applications MUST NOT crash when encountering these schemes.
+
+## 19.5 URI Resolution Safety
+
+Applications resolving `entry://`, `sound://`, or `video://` URIs:
+
+MUST:
+
+- normalize percent encoding
+- reject control characters
+- reject embedded null bytes
+- reject traversal outside package boundaries
+
+Applications MUST NOT:
+
+- resolve remote HTTP(S) resources automatically
+- execute scripts during URI resolution
+- access arbitrary filesystem locations
 
 ---
 
@@ -1014,13 +1176,26 @@ Custom fonts MUST be placed in the `fonts/` directory and declared in `style.css
 
 Fonts SHOULD be subsetted to reduce package size where practical.
 
+## 23.5 Recommended Media Formats [NEW]
+
+For maximum interoperability, applications SHOULD support the following formats:
+
+| Media Type | Recommended Codecs / Containers |
+|------------|--------------------------------|
+| Audio      | MP3 (`.mp3`), OGG Vorbis (`.ogg`) |
+| Video      | MP4/H.264 (`.mp4`), WebM (`.webm`) |
+| Images     | PNG, JPEG, SVG |
+| Fonts      | WOFF2, WOFF |
+
+These are non‑normative recommendations; applications MAY support additional formats.
+
 ---
 
 # 24. HTML5 Compatibility
 
-Diction is an HTML5-compatible lexical fragment format.
+Diction is an HTML5‑compatible lexical fragment format.
 
-Diction lexical tags are valid HTML-compatible custom elements:
+Diction lexical tags are valid HTML‑compatible custom elements:
 
 ```html
 <headword>
@@ -1081,6 +1256,39 @@ Diction supports inline and external SVG graphics.
 
 Applications SHOULD tolerate valid HTML5 structural nesting inside lexical containers.
 
+## 24.6 Reserved Lexical Elements
+
+The following lexical element names are reserved by the Diction specification:
+
+```text
+headword
+alias
+inflection
+sense
+definition
+pronunciation
+example
+etymology
+pos
+```
+
+Future specification versions MAY reserve additional lexical elements.
+
+Applications MUST tolerate unknown elements.
+
+## 24.7 Extension Element Policy
+
+Custom extension elements SHOULD use one of the following forms:
+
+```html
+<x-example>
+<vendor-example>
+```
+
+Applications MUST preserve unknown extension elements during round‑trip processing whenever possible.
+
+Unknown extension elements MUST NOT invalidate a package.
+
 ---
 
 # 25. Styling Model
@@ -1090,16 +1298,16 @@ Styling is external.
 Applications MAY render Diction fragments using:
 
 - external CSS stylesheets declared in `meta.json`
-- built-in semantic fallback styles
+- built‑in semantic fallback styles
 - native UI rendering systems
 
 ## 25.1 External Stylesheets
 
 Applications SHOULD load the stylesheet declared in `meta.json`.
 
-## 25.2 Built-In Fallback Rendering
+## 25.2 Built‑In Fallback Rendering
 
-Applications SHOULD provide a minimal built-in fallback stylesheet for when the package stylesheet cannot be loaded.
+Applications SHOULD provide a minimal built‑in fallback stylesheet for when the package stylesheet cannot be loaded.
 
 ## 25.3 Sense Styling Guidance
 
@@ -1183,7 +1391,26 @@ Applications MUST NOT depend on:
 - literal whitespace
 - attribute order
 - exact formatting layout
-- static regex-only parsing
+- static regex‑only parsing
+
+## 26.1 Error Recovery Requirements
+
+Applications SHOULD implement fault‑tolerant parsing behavior.
+
+Malformed entries SHOULD NOT invalidate the entire dictionary.
+
+Recommended recovery behavior:
+
+| Problem | Recommended Handling |
+|---|---|
+| malformed entry markup | skip invalid subtree |
+| missing closing tag | recover using HTML5 parsing rules |
+| duplicate sense IDs | first occurrence wins |
+| invalid UTF-8 | replace with U+FFFD |
+| unknown attributes | ignore |
+| unknown elements | preserve or ignore |
+
+Applications MUST NOT crash on malformed lexical content.
 
 ---
 
@@ -1203,11 +1430,76 @@ Applications MUST index `<alias>` values as alternate keys pointing to the same 
 
 Applications MUST index `<inflection>` values as alternate keys pointing to the same entry. The `form` attribute SHOULD be stored alongside the indexed key so applications can display the grammatical relationship on lookup.
 
-Applications SHOULD use:
+## 27.1 Lookup Normalization Pipeline
 
-- stable sorting
-- case-insensitive comparison
-- normalized Unicode ordering
+Recommended normalization pipeline:
+
+```text
+UTF-8 decode
+    ↓
+parse key element and extract visible text
+    ↓
+ignore markup inside the key element
+    ↓
+normalize whitespace
+    ↓
+remove zero-width formatting characters
+    ↓
+Unicode NFC normalization
+    ↓
+case folding
+    ↓
+optional locale-aware normalization
+    ↓
+index insertion
+```
+
+Applications MUST use Unicode‑aware simple case folding for required case-insensitive lookup. Applications MUST NOT rely on ASCII‑only lowercase conversion for canonical lookup behavior.
+
+### 27.1.1 Case Folding Guidance
+
+Applications MUST use **Unicode‑aware simple case folding** when generating canonical stored lookup keys. Simple case folding maps each character to its lowercase equivalent (if defined) without multi‑character expansions.
+
+Applications MAY use more aggressive normalization strategies (including full Unicode case folding, locale‑aware matching, or transliteration‑aware matching) during query‑time lookup and search expansion.
+
+Canonical index keys SHOULD remain stable and minimally transformed.
+
+Example considerations:
+
+```text
+straße
+
+Simple folded canonical key: → "straße"
+
+Optional expanded query matching: → "strasse"
+```
+
+Applications SHOULD avoid irreversible multi‑character expansions when generating stored canonical keys unless explicitly configured by the dictionary runtime.
+
+## 27.2 Optional Locale-Aware Matching
+
+Applications MAY implement:
+
+- accent‑insensitive matching
+- kana normalization
+- width normalization
+- locale‑aware collation
+- transliteration‑based matching
+
+Examples:
+
+```text
+é == e
+ｶﾀｶﾅ == カタカナ
+```
+
+These behaviors are optional and implementation‑defined.
+
+## 27.3 Index Ordering [NEW]
+
+Binary index ordering (i.e., the order in which entries are stored in the external lookup index) is **implementation‑defined**. Applications MAY choose any stable order that allows correct lookup (e.g., lexicographic by normalized key, insertion order, or application‑specific collation).
+
+This flexibility avoids prescribing a specific Unicode collation algorithm (like UCA) that may be impractical for some environments.
 
 ---
 
@@ -1222,7 +1514,7 @@ stream tokenizer
       ↓
 external index (stored in app cache, not in .diction package)
       ↓
-memory-mapped lookup
+memory‑mapped lookup
       ↓
 entry extraction
       ↓
@@ -1242,11 +1534,11 @@ A single HTML fragment file MAY contain millions of entries. Applications SHOULD
 Recommended strategies include:
 
 - streaming tokenization
-- mmap-based access
+- mmap‑based access
 - incremental indexing
-- byte-offset lookup tables
+- byte‑offset lookup tables
 
-## 28.3 Authoring Workflow for Large Dictionaries (Non-Normative)
+## 28.3 Authoring Workflow for Large Dictionaries (Non‑Normative)
 
 During authoring, dictionary builders MAY maintain entries across multiple smaller source files. A build step SHOULD concatenate these into the final single HTML file before packaging.
 
@@ -1260,7 +1552,24 @@ single dictionary.html
 .diction package
 ```
 
-Applications processing packaged `.diction` archives MUST support only the single-file format.
+Applications processing packaged `.diction` archives MUST support only the single‑file format.
+
+## 28.4 Deterministic Packaging
+
+Applications generating `.diction` packages SHOULD produce deterministic ZIP archives whenever possible.
+
+Recommended practices:
+
+- stable file ordering
+- normalized timestamps
+- ZIP64 support for large archives
+- reproducible compression settings
+
+This improves:
+
+- cache consistency
+- hashing reliability
+- reproducible builds
 
 ---
 
@@ -1285,6 +1594,20 @@ find <inflection form="..."> → record as alternate key + form label → same b
     ↓
 build index
 ```
+
+## 29.1 Streaming Parser Expectations
+
+Applications SHOULD support streaming tokenization for large fragment streams.
+
+Applications SHOULD avoid requiring full DOM materialization.
+
+Recommended capabilities:
+
+- incremental tokenization
+- byte‑offset indexing
+- mmap‑friendly access
+- sequential scanning
+- bounded memory usage
 
 ---
 
@@ -1320,7 +1643,7 @@ Applications MUST NOT execute embedded JavaScript.
 
 Applications resolving `sound://`, `video://`, `src` attributes on `<img>`, `<audio>`, and `<video>` elements MUST verify that the resolved file path remains within the `media/` directory of the package.
 
-Path components including `..`, absolute paths, and URL-encoded equivalents (e.g. `%2F`, `%2E%2E`) MUST be rejected before any file access is attempted.
+Path components including `..`, absolute paths, and URL‑encoded equivalents (e.g. `%2F`, `%2E%2E`) MUST be rejected before any file access is attempted.
 
 Example rejected paths:
 
@@ -1329,6 +1652,37 @@ sound://media/../../../etc/passwd   → REJECT
 sound://media/%2e%2e/secret.mp3    → REJECT
 sound://media/pronunciation.mp3    → ALLOW
 ```
+
+## 30.2 Remote Resource Restrictions
+
+Applications MUST treat Diction packages as self‑contained content containers.
+
+The following are prohibited:
+
+- remote script loading
+- remote CSS loading
+- automatic remote media fetching
+- external iframe embedding
+
+Allowed resources MUST resolve only within the package archive.
+
+## 30.3 SVG and MathML Sanitization [NEW]
+
+Both SVG and MathML can contain active or remote content. Applications that render SVG or MathML using a browser engine MUST sanitize these namespaces to remove:
+
+- `<script>` elements and any `on*` event attributes
+- External references (e.g., `xlink:href` to remote URLs)
+- Animations or references that load remote resources, including animation elements with remote URI targets
+
+For Diction 1.0, the simplest safe approach is to allow only static SVG and MathML without scripting or external dependencies.
+
+## 30.4 CSS Safety Policy [NEW]
+
+CSS `url()` references MUST resolve only within the package archive (relative to the CSS file). Remote `url()` references (e.g., `url(http://example.com/font.woff)`) MUST be ignored or rejected.
+
+The CSS `@import` rule is prohibited.
+
+Applications SHOULD also reject CSS that attempts to load remote resources via `behavior`, `expression`, or other legacy dynamic features.
 
 ---
 
@@ -1347,6 +1701,8 @@ The `alt` attribute is REQUIRED on all `<img>` elements:
 ```html
 <div lang="hi">किताब</div>
 ```
+
+The HTML5 `lang` attribute is the canonical language attribute in Diction. For compatibility with XML-derived source material, applications SHOULD treat `xml:lang` as an alias for `lang` when `lang` is absent. If both `lang` and `xml:lang` are present and differ, `lang` takes precedence.
 
 ## 31.3 RTL Support
 
@@ -1371,6 +1727,17 @@ Pronunciation blocks SHOULD expose both readable phonetic text and accessible au
 
 Applications SHOULD provide keyboard navigation between senses within an entry.
 
+## 31.6 Accessibility Recommendations
+
+Applications SHOULD:
+
+- expose semantic entry navigation
+- expose sense‑level keyboard traversal
+- preserve language metadata
+- support screen‑reader compatible pronunciation controls
+- preserve ruby annotations
+- preserve MathML semantics where supported
+
 ---
 
 # 32. Packaging Guidelines
@@ -1381,7 +1748,21 @@ mkdir -p Oxford/media Oxford/fonts
 zip -r Oxford.diction Oxford/
 ```
 
-Binary and media files (images, audio, video, fonts) SHOULD be stored uncompressed (`STORED`) in the ZIP since they are already compressed. Text files (HTML, CSS, JSON) SHOULD use `DEFLATE` compression.
+## 32.1 Compression Recommendations
+
+Recommended ZIP compression behavior:
+
+| File Type | Recommended Method |
+|---|---|
+| HTML | DEFLATE |
+| CSS | DEFLATE |
+| JSON | DEFLATE |
+| images | STORED |
+| audio | STORED |
+| video | STORED |
+| fonts | STORED |
+
+Already‑compressed binary assets SHOULD NOT be recompressed.
 
 ---
 
@@ -1451,7 +1832,7 @@ Binary and media files (images, audio, video, fonts) SHOULD be stored uncompress
   <pos>noun</pos>
   <sense n="1" domain="mathematics">
     <definition>
-      The theorem stating that in a right-angled triangle, the square of the
+      The theorem stating that in a right‑angled triangle, the square of the
       hypotenuse equals the sum of the squares of the other two sides:
       <math>
         <mrow>
@@ -1541,7 +1922,7 @@ Recommended mapping:
 | `#CONTENTS_LANGUAGE` | `meta.json` `content_languages` (via BCP 47 map) |
 | `#NAME` | `meta.json` `name` + HTML header comment |
 
-Note: DSL does not have native sense or inflection markup. These elements should be populated by dictionary authors or post-processing tools when converting DSL to Diction.
+Note: DSL does not have native sense or inflection markup. These elements should be populated by dictionary authors or post‑processing tools when converting DSL to Diction.
 
 ---
 
@@ -1560,9 +1941,9 @@ It is intentionally simplified and may not correctly handle:
 - malformed legacy DSL
 - complex embedded formatting
 - advanced Lingvo directives
-- automatic sense or inflection detection (these must be added manually or via post-processing)
+- automatic sense or inflection detection (these must be added manually or via post‑processing)
 
-Production-grade converters SHOULD use a proper parser architecture rather than simple line-oriented processing.
+Production‑grade converters SHOULD use a proper parser architecture rather than simple line‑oriented processing.
 
 Recommended approaches include:
 
@@ -1570,6 +1951,25 @@ Recommended approaches include:
 - recursive descent parsing
 - parser combinators
 - libraries such as `lark` or `pyparsing`
+
+## 35.2 Validation Guidance
+
+Validator implementations SHOULD check:
+
+- UTF-8 correctness
+- required metadata presence
+- package directory structure
+- illegal executable content
+- invalid URI schemes
+- duplicate sense identifiers
+- malformed lexical nesting
+- path traversal attempts
+
+Validation SHOULD distinguish:
+
+- fatal errors
+- recoverable errors
+- warnings
 
 ---
 
@@ -1596,6 +1996,7 @@ Recommended approaches include:
 ### Entry Structure
 
 - [ ] every entry uses `<article class="entry">`
+- [ ] entries are flat (no nesting)
 - [ ] `<inflection>` elements carry a `form` attribute
 - [ ] `<sense>` elements carry an `n` attribute
 - [ ] `<sense>` `n` values are unique within each entry
@@ -1603,7 +2004,7 @@ Recommended approaches include:
 
 ### Entry Ordering
 
-- [ ] entries sorted alphabetically by headword (case-insensitive, Unicode NFC normalized)
+- [ ] entries sorted alphabetically by normalized headword (case‑insensitive, NFC) – or implementation‑defined order is allowed
 
 ### Indexing
 
@@ -1617,6 +2018,8 @@ Recommended approaches include:
 - [ ] no executable payloads
 - [ ] no inline JS event attributes
 - [ ] media paths confined to `media/` directory (no path traversal)
+- [ ] SVG/MathML sanitized
+- [ ] CSS `@import` and remote `url()` prohibited
 
 ---
 
@@ -1640,3 +2043,87 @@ Applications MUST ignore unknown:
 - metadata extensions
 
 without crashing.
+
+## 37.2 Unknown Feature Handling
+
+Applications MUST ignore unknown:
+
+- elements
+- attributes
+- classes
+- metadata fields
+
+unless explicitly prohibited by a future specification revision.
+
+Unknown features MUST NOT cause parsing failure.
+
+## 37.3 Compatibility Philosophy
+
+Diction prioritizes:
+
+1. streaming efficiency
+2. interoperability
+3. long‑term archival stability
+4. forward compatibility
+5. implementation simplicity
+
+The specification intentionally avoids:
+
+- executable runtime logic
+- browser application assumptions
+- embedded indexing formats
+- tightly coupled rendering systems
+
+## 37.4 Future Versioning Guidance
+
+Future versions of Diction SHOULD preserve compatibility with Diction 1.x whenever practical.
+
+Breaking changes SHOULD require:
+
+- a major format version increment
+- explicit migration guidance
+- validator updates
+
+Applications SHOULD expose format compatibility warnings rather than hard failures whenever safe recovery is possible.
+
+## 37.5 Version Negotiation [NEW]
+
+The `"format"` field in `meta.json` indicates the major version of the Diction spec the package targets.
+
+- Applications MAY attempt to open packages with a `"format"` value higher than they support, but they MUST operate in a best‑effort compatibility mode (ignoring unknown features, preserving data when possible).
+- Applications SHOULD warn the user when a package requires a newer format version.
+
+This prevents hard rejection of future packages and encourages gradual adoption.
+
+---
+
+# 38. Non‑Normative Grammar (Informative) [NEW]
+
+While Diction 1.0 does not provide a machine‑readable grammar, the following informal EBNF describes the intended lexical structure for implementers.
+
+```ebnf
+(* fragment stream *)
+diction   = { entry | non_entry_content } ;
+non_entry_content = (* any well‑formed HTML5 content outside articles *);
+
+(* lexical entry *)
+entry     = "<article class=\"entry\">" , entry_body , "</article>" ;
+entry_body = { headword? , alias* , inflection* , pronunciation* , pos? , sense* , etymology? } ;
+
+headword  = "<headword>" , text , "</headword>" ;
+alias     = "<alias>" , text , "</alias>" ;
+inflection= "<inflection form=\"" , form , "\">" , text , "</inflection>" ;
+pronunciation = "<pronunciation dialect=\"" , dialect , "\"?>" , ( text | audio ) , "</pronunciation>" ;
+sense     = "<sense n=\"" , number , "\" id=\"" , id , "\"?" , ( "domain=\"" , domain , "\"")? , ( "register=\"" , register , "\"")? , ">" , sense_body , "</sense>" ;
+sense_body = { definition , example* , sense* } ;
+definition= "<definition>" , text , "</definition>" ;
+example   = "<example source=\"" , source , "\"?>" , text , "</example>" ;
+etymology = "<etymology>" , text , "</etymology>" ;
+pos       = "<pos>" , text , "</pos>" ;
+```
+
+This grammar is informative only; the normative definition remains the textual specification.
+
+---
+
+**End of Diction Specification 1.0**

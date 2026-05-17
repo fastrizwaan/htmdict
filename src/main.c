@@ -35,6 +35,7 @@ typedef struct {
     GtkLabel        *progress_label;
     GtkButton       *theme_toggle;
     guint            activated_pos;  /* position of last activated headword row */
+    GtkWidget       *main_window;
 } AppState;
 
 typedef struct {
@@ -224,6 +225,9 @@ static gboolean loading_finished(AppState *app) {
     if (app->progress_dialog) {
         gtk_window_destroy(GTK_WINDOW(app->progress_dialog));
         app->progress_dialog = NULL;
+    }
+    if (app->main_window) {
+        gtk_window_present(GTK_WINDOW(app->main_window));
     }
     return G_SOURCE_REMOVE;
 }
@@ -1052,7 +1056,10 @@ static void app_activate(GtkApplication *gtk_app, gpointer ud) {
         gtk_window_set_title(GTK_WINDOW(win), "htmdict");
     }
 
-    gtk_window_present(GTK_WINDOW(win));
+    app->main_window = win;
+    if (!app->progress_dialog) {
+        gtk_window_present(GTK_WINDOW(win));
+    }
 }
 
 static void app_state_free(gpointer p) {

@@ -2,6 +2,7 @@
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 char *diction_safe_name(const char *name) {
     if (!name || !name[0]) return g_strdup("Dictionary");
@@ -130,8 +131,9 @@ gboolean diction_write_standard_css(const char *path, GError **error) {
         "  color: #242424;\n"
         "  background: #ffffff;\n"
         "}\n"
-        ".entry { margin: 0 0 1.5rem; }\n"
+        ".entry { margin: 0 0 1.5rem; padding: 18px; border: 1px solid #d0d0d0; border-radius: 8px; background: #f7f7f7; }\n"
         ".entry > header { margin-bottom: 0.45rem; }\n"
+        "headword { display: block; margin: 0 0 0.45rem; font-size: 1.8rem; font-weight: 700; color: #9f2323; }\n"
         ".headword { margin: 0; font-size: 1.8rem; font-weight: 700; color: #9f2323; }\n"
         ".pronunciation { color: #4d6070; margin: 0.2rem 0 0.55rem; }\n"
         ".ipa { font-family: \"Charis SIL\", \"Noto Sans\", sans-serif; }\n"
@@ -189,7 +191,15 @@ gboolean diction_write_meta(const char *path,
     fputs(index_languages && index_languages[0] ? index_languages : "[\"en\"]", meta);
     fputs(",\n  \"content_languages\": ", meta);
     fputs(content_languages && content_languages[0] ? content_languages : "[\"en\"]", meta);
-    fputs(",\n  \"version\": \"1.0\",\n  \"stylesheet\": \"style.css\",\n  \"html\": ", meta);
+    char created[11] = "1970-01-01";
+    time_t now = time(NULL);
+    struct tm tm;
+    if (gmtime_r(&now, &tm))
+        strftime(created, sizeof(created), "%Y-%m-%d", &tm);
+
+    fputs(",\n  \"version\": \"1.0\",\n  \"created\": ", meta);
+    diction_print_json_string(meta, created);
+    fputs(",\n  \"stylesheet\": \"style.css\",\n  \"html\": ", meta);
     diction_print_json_string(meta, html_name);
     fputs("\n}\n", meta);
     fclose(meta);

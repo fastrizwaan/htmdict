@@ -31,8 +31,10 @@ DEFAULT_CSS = """\
 
 article.entry {
     margin-bottom: 1.5rem;
-    padding-bottom: 1rem;
-    border-bottom: 1px solid #ccc;
+    padding: 18px;
+    border: 1px solid #d0d0d0;
+    border-radius: 8px;
+    background: #f7f7f7;
 }
 
 headword {
@@ -638,6 +640,16 @@ def extract_media_assets(dsl_path: pathlib.Path, media_dir: pathlib.Path) -> Non
     stem = dsl_path.stem
     total = 0
 
+    def _safe_rel_path(path: str | pathlib.PurePath) -> pathlib.Path | None:
+        """Return a safe relative path, or None for absolute/traversal paths."""
+        pure = pathlib.PurePosixPath(str(path).replace("\\", "/"))
+        if pure.is_absolute():
+            return None
+        parts = [p for p in pure.parts if p not in ("", ".")]
+        if not parts or any(p == ".." for p in parts):
+            return None
+        return pathlib.Path(*parts)
+
     def _copy_file(src: pathlib.Path, dest: pathlib.Path) -> bool:
         """Copy src to dest; skip if dest already exists. Returns True if copied."""
         if dest.exists():
@@ -661,9 +673,12 @@ def extract_media_assets(dsl_path: pathlib.Path, media_dir: pathlib.Path) -> Non
                 if len(parts) > 1 and parts[0].lower() in (
                     stem.lower(), f"{stem.lower()}.files"
                 ):
-                    rel = pathlib.Path(*parts[1:])
+                    rel = _safe_rel_path(pathlib.PurePosixPath(*parts[1:]))
                 else:
-                    rel = pathlib.Path(member.filename)
+                    rel = _safe_rel_path(member.filename)
+                if rel is None:
+                    print(f"  Skipping unsafe media path: {member.filename}")
+                    continue
                 dest = media_dir / rel
                 if not dest.exists():
                     dest.parent.mkdir(parents=True, exist_ok=True)

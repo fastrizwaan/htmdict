@@ -325,17 +325,23 @@ static const char *theme_css(gboolean dark) {
         return "html, body { background-color: #1e1e1e !important; color: #e0e0e0 !important; } "
                "body { font-family: sans-serif; padding: 20px; line-height: 1.6; color-scheme: dark; } "
                "a { color: #8ab4f8 !important; } "
-               ".headword-row { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; } "
-               ".dict-name { flex-shrink: 0; font-size: 0.95rem; opacity: 0.72; } "
-               "article h1.headword { display: none; } "
+               ".entry-card { border: 1px solid #3a3a3a; border-radius: 8px; padding: 18px; background: #242424; } "
+               ".entry-card article.entry { margin: 0; padding: 0 !important; border: 0 !important; background: transparent !important; } "
+               ".headword-row { display: flex; align-items: baseline; justify-content: flex-end; gap: 1rem; margin-bottom: 0.35rem; } "
+               ".dict-name { flex-shrink: 0; font-size: 0.95rem; opacity: 0.78; } "
+               "headword { display: block; margin: 0 0 0.55rem; font-size: 2rem; line-height: 1.15; font-weight: 700; color: #ef6b6b; } "
+               "article.entry:has(headword) h1.headword { display: none; } "
                "font[color], span[style*='color'], div[style*='color'], p[style*='color'] { color: inherit !important; } "
-               "*:not(html):not(body):not(img):not(svg):not(canvas):not(video) { background-color: transparent !important; }";
+               "*:not(html):not(body):not(img):not(svg):not(canvas):not(video):not(.entry-card) { background-color: transparent !important; }";
     } else {
         return "html, body { background: #fafafa !important; color: #1a1a1a !important; } "
                "body { font-family: sans-serif; padding: 20px; line-height: 1.6; color-scheme: light; } "
-               ".headword-row { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; } "
+               ".entry-card { border: 1px solid #d0d0d0; border-radius: 8px; padding: 18px; background: #f7f7f7; } "
+               ".entry-card article.entry { margin: 0; padding: 0 !important; border: 0 !important; background: transparent !important; } "
+               ".headword-row { display: flex; align-items: baseline; justify-content: flex-end; gap: 1rem; margin-bottom: 0.35rem; } "
                ".dict-name { flex-shrink: 0; font-size: 0.95rem; opacity: 0.72; } "
-               "article h1.headword { display: none; } "
+               "headword { display: block; margin: 0 0 0.55rem; font-size: 2rem; line-height: 1.15; font-weight: 700; color: #9f2323; } "
+               "article.entry:has(headword) h1.headword { display: none; } "
                "a { color: #0066cc !important; }";
     }
 }
@@ -399,32 +405,35 @@ static void on_theme_toggled(GtkButton *btn, gpointer ud) {
 
 static char *normalize_for_search(const char *s) {
     if (!s) return NULL;
-    GString *out = g_string_new("");
-    const char *p = s;
-    while (*p) {
-        size_t len = g_utf8_skip[*(unsigned char *)p];
-        /* Use a temporary copy of get_dsl_ignored_len_ext logic or export it */
-        /* For now, let's just use the same symbols we know are ignored */
-        gunichar ch = g_utf8_get_char(p);
-        gboolean ignore = FALSE;
-        if (g_unichar_isspace(ch) || ch == '*' || ch == '#' ||
-            ch == 0x266F || ch == 0x266D || ch == 0x266E ||
-            ch == 0x2191 || ch == 0x2193 || ch == 0x00B7 ||
-            ch == 0x02C8 || ch == 0x02CC ||
-            ch == 0x2018 || ch == 0x2019 || ch == 0x201C || ch == 0x201D ||
-            ch == '(' || ch == ')' || ch == '[' || ch == ']' ||
-            ch == '{' || ch == '}' || 
-            ch == '-' || ch == '\'' || ch == '`' || ch == '"' ||
-            ch == ';' || ch == ':' || ch == '.' || ch == ',' ||
-            ch == '!' || ch == '?' || ch == '_' || ch == '/' ||
-            ch == '|' || ch == '~' ||
-            g_unichar_type(ch) == G_UNICODE_NON_SPACING_MARK) {
-            ignore = TRUE;
+    GString *tmp = g_string_new(NULL);
+    gboolean in_ws = FALSE;
+    for (const char *p = s; *p; ) {
+        gunichar ch = g_utf8_get_char_validated(p, -1);
+        if (ch == (gunichar)-1 || ch == (gunichar)-2) {
+            p++;
+            continue;
         }
-        if (!ignore) g_string_append_len(out, p, len);
-        p += len;
+        p = g_utf8_next_char(p);
+        if (ch == 0x200B || ch == 0x200C || ch == 0x200D || ch == 0xFEFF)
+            continue;
+        if (g_unichar_isspace(ch)) {
+            if (!in_ws && tmp->len > 0) {
+                g_string_append_c(tmp, ' ');
+                in_ws = TRUE;
+            }
+            continue;
+        }
+        in_ws = FALSE;
+        ch = g_unichar_tolower(ch);
+        char buf[8] = {0};
+        gint n = g_unichar_to_utf8(ch, buf);
+        g_string_append_len(tmp, buf, n);
     }
-    return g_string_free(out, FALSE);
+    if (tmp->len > 0 && tmp->str[tmp->len - 1] == ' ')
+        g_string_truncate(tmp, tmp->len - 1);
+    char *nfc = g_utf8_normalize(tmp->str, -1, G_NORMALIZE_NFC);
+    g_string_free(tmp, TRUE);
+    return nfc ? nfc : g_strdup("");
 }
 
 /* ── page building ─────────────────────────────────────────────── */
@@ -441,6 +450,11 @@ static char *build_page(AppState *app, const char *body_html) {
 
     char *page = g_strdup_printf(
         "<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
+        "<meta http-equiv=\"Content-Security-Policy\" "
+        "content=\"default-src 'none'; img-src htmdict: media: sound: data:; "
+        "media-src htmdict: media: sound: data:; style-src 'self' 'unsafe-inline' htmdict:; "
+        "font-src htmdict: data:; script-src 'none'; object-src 'none'; frame-src 'none'; "
+        "form-action 'none'; connect-src 'none'\">"
         "<base href=\"%s\"/>"
         "<style id=\"__htmdict_theme\">%s</style>"
         "%s"
@@ -462,11 +476,11 @@ static void load_word(AppState *app, const char *word) {
     char *full_html = NULL;
     if (html && html[0]) {
         full_html = g_strdup_printf(
-            "<div class=\"headword-row\">"
-            "<h1 class=\"headword\">%s</h1>"
-            "<span class=\"dict-name\">%s</span>"
-            "</div>%s", 
-            word, htm_dict_display_name(d), html);
+            "<section class=\"entry-card\">"
+            "<div class=\"headword-row\"><span class=\"dict-name\">%s</span></div>"
+            "%s"
+            "</section>",
+            htm_dict_display_name(d), html);
     }
     char *page = build_page(app, full_html ? full_html : "<p><i>No entry.</i></p>");
     char *base = g_strdup_printf("htmdict://%s/%s", htm_dict_id(d), htm_dict_resource_prefix(d));

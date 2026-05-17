@@ -30,12 +30,10 @@ static char *stem_from_input(const char *input_path) {
 }
 
 static void write_entry_open(FILE *out, const char *key) {
-    fputs("<article id=\"", out);
-    diction_print_html_attr(out, key);
-    fputs("\" class=\"entry\">\n", out);
-    fputs("  <header>\n    <h1 class=\"headword\">", out);
+    fputs("<article class=\"entry\">\n", out);
+    fputs("  <headword>", out);
     diction_print_html_text(out, key);
-    fputs("</h1>\n  </header>\n", out);
+    fputs("</headword>\n", out);
 }
 
 static char *extract_link_target(const uint8_t *data, size_t len) {

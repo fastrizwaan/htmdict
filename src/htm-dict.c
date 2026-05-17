@@ -30,6 +30,7 @@ struct HtmDict {
     char *display_name;
     char *index_lang;
     char *contents_lang;
+    char *root_prefix;
     char *html_entry;
     char *resource_prefix;
     char *stylesheet;
@@ -68,45 +69,121 @@ FlatIndex  *htm_dict_get_flat_index(HtmDict *d)  { return d ? d->flat_index : NU
 /*  Helpers                                                        */
 /* ────────────────────────────────────────────────────────────── */
 
-static char *zip_basename_stem(const char *zip_path) {
-    char *base = g_path_get_basename(zip_path);
-    char *dot  = strrchr(base, '.');
-    if (dot && g_ascii_strcasecmp(dot, ".diction") == 0)
-        *dot = '\0';
-    return base;
-}
-
-static char *discover_html_entry(ZipMmap *z, const char *zip_path) {
-    char *stem = zip_basename_stem(zip_path);
-
-    /* 1. stem.html at root */
-    char *try1 = g_strdup_printf("%s.html", stem);
-    if (zip_mmap_lookup(z, try1)) { g_free(stem); return try1; }
-    g_free(try1);
-
-    /* 2. stem/stem.html one level deep */
-    char *try2 = g_strdup_printf("%s/%s.html", stem, stem);
-    if (zip_mmap_lookup(z, try2)) { g_free(stem); return try2; }
-    g_free(try2);
-
-    /* 3. first .html at most one directory level */
-    GPtrArray *names    = zip_mmap_list_names(z);
-    char      *fallback = NULL;
-    for (guint i = 0; names && i < names->len; i++) {
-        const char *n     = g_ptr_array_index(names, i);
-        if (!g_str_has_suffix(n, ".html")) continue;
-        const char *slash = strchr(n, '/');
-        if (slash && strchr(slash + 1, '/')) continue;
-        if (!fallback) fallback = g_strdup(n);
-    }
-    g_free(stem);
-    return fallback;
-}
-
 static char *resource_prefix_from_html_entry(const char *html_entry) {
     const char *slash = strrchr(html_entry, '/');
     if (!slash) return g_strdup("");
     return g_strndup(html_entry, (gsize)(slash - html_entry + 1));
+}
+
+static gboolean archive_path_is_safe(const char *path) {
+    if (!path || !*path) return FALSE;
+    if (path[0] == '/' || path[0] == '\\') return FALSE;
+
+    for (const unsigned char *p = (const unsigned char *)path; *p; p++) {
+        if (*p < 0x20 || *p == 0x7f || *p == '\\') return FALSE;
+    }
+
+    char **parts = g_strsplit(path, "/", -1);
+    gboolean ok = TRUE;
+    for (guint i = 0; parts[i]; i++) {
+        if (parts[i][0] == '\0' && parts[i + 1] == NULL) {
+            continue;
+        }
+        if (parts[i][0] == '\0' || g_strcmp0(parts[i], ".") == 0 || g_strcmp0(parts[i], "..") == 0) {
+            ok = FALSE;
+            break;
+        }
+    }
+    g_strfreev(parts);
+    return ok;
+}
+
+static gboolean resource_path_is_safe(const char *path) {
+    if (!path || !*path) return FALSE;
+    if (strstr(path, "://")) return FALSE;
+
+    char *unescaped = g_uri_unescape_string(path, NULL);
+    if (!unescaped) return FALSE;
+    gboolean ok = archive_path_is_safe(unescaped);
+    g_free(unescaped);
+    return ok;
+}
+
+static gboolean discover_diction_root(ZipMmap *z, char **out_root, GError **error) {
+    GPtrArray *names = zip_mmap_list_names(z);
+    char *root = NULL;
+
+    for (guint i = 0; names && i < names->len; i++) {
+        const char *name = g_ptr_array_index(names, i);
+        if (!name || !*name) continue;
+        if (!archive_path_is_safe(name)) {
+            g_set_error(error, G_FILE_ERROR, G_FILE_ERROR_FAILED, "unsafe archive path: %s", name);
+            g_free(root);
+            return FALSE;
+        }
+        const char *slash = strchr(name, '/');
+        if (!slash || slash == name) {
+            g_set_error(error, G_FILE_ERROR, G_FILE_ERROR_FAILED, ".diction archive must contain exactly one top-level root directory");
+            g_free(root);
+            return FALSE;
+        }
+        char *candidate = g_strndup(name, (gsize)(slash - name));
+        if (!root) {
+            root = candidate;
+        } else if (g_strcmp0(root, candidate) != 0) {
+            g_set_error(error, G_FILE_ERROR, G_FILE_ERROR_FAILED, ".diction archive contains multiple top-level roots");
+            g_free(candidate);
+            g_free(root);
+            return FALSE;
+        } else {
+            g_free(candidate);
+        }
+    }
+
+    if (!root) {
+        g_set_error(error, G_FILE_ERROR, G_FILE_ERROR_FAILED, "empty .diction archive");
+        return FALSE;
+    }
+
+    *out_root = g_strconcat(root, "/", NULL);
+    g_free(root);
+    return TRUE;
+}
+
+static gboolean meta_string_member(JsonObject *obj, const char *name, const char **out, GError **error) {
+    if (!json_object_has_member(obj, name) || !JSON_NODE_HOLDS_VALUE(json_object_get_member(obj, name))) {
+        g_set_error(error, G_FILE_ERROR, G_FILE_ERROR_FAILED, "meta.json missing required string field: %s", name);
+        return FALSE;
+    }
+    const char *s = json_object_get_string_member(obj, name);
+    if (!s || !*s || !archive_path_is_safe(s)) {
+        g_set_error(error, G_FILE_ERROR, G_FILE_ERROR_FAILED, "meta.json field %s is not a safe relative path/name", name);
+        return FALSE;
+    }
+    *out = s;
+    return TRUE;
+}
+
+static gboolean meta_required_string(JsonObject *obj, const char *name, GError **error) {
+    if (!json_object_has_member(obj, name) || !JSON_NODE_HOLDS_VALUE(json_object_get_member(obj, name)) ||
+        !json_object_get_string_member(obj, name)) {
+        g_set_error(error, G_FILE_ERROR, G_FILE_ERROR_FAILED, "meta.json missing required string field: %s", name);
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static gboolean meta_required_string_array(JsonObject *obj, const char *name, GError **error) {
+    if (!json_object_has_member(obj, name) || !JSON_NODE_HOLDS_ARRAY(json_object_get_member(obj, name))) {
+        g_set_error(error, G_FILE_ERROR, G_FILE_ERROR_FAILED, "meta.json missing required array field: %s", name);
+        return FALSE;
+    }
+    JsonArray *arr = json_object_get_array_member(obj, name);
+    if (json_array_get_length(arr) == 0) {
+        g_set_error(error, G_FILE_ERROR, G_FILE_ERROR_FAILED, "meta.json array field is empty: %s", name);
+        return FALSE;
+    }
+    return TRUE;
 }
 
 static gboolean parse_meta_json(HtmDict *d, const char *json_path, GError **error) {
@@ -125,25 +202,50 @@ static gboolean parse_meta_json(HtmDict *d, const char *json_path, GError **erro
     }
 
     JsonNode *root = json_parser_get_root(parser);
-    if (JSON_NODE_HOLDS_OBJECT(root)) {
-        JsonObject *obj = json_node_get_object(root);
-        if (json_object_has_member(obj, "name")) {
-            g_free(d->display_name);
-            d->display_name = g_strdup(json_object_get_string_member(obj, "name"));
-        }
-        if (json_object_has_member(obj, "stylesheet")) {
-            g_free(d->stylesheet);
-            d->stylesheet = g_strdup(json_object_get_string_member(obj, "stylesheet"));
-        }
-        if (json_object_has_member(obj, "html")) {
-            g_free(d->html_entry);
-            const char *html_val = json_object_get_string_member(obj, "html");
-            /* html path in meta.json is relative to the dictionary root (the folder containing meta.json) */
-            char *dir = g_path_get_dirname(json_path);
-            if (g_strcmp0(dir, ".") == 0) d->html_entry = g_strdup(html_val);
-            else                          d->html_entry = g_build_filename(dir, html_val, NULL);
-            g_free(dir);
-        }
+    if (!JSON_NODE_HOLDS_OBJECT(root)) {
+        g_set_error(error, G_FILE_ERROR, G_FILE_ERROR_FAILED, "meta.json root must be an object");
+        g_object_unref(parser);
+        g_free(data);
+        return FALSE;
+    }
+
+    JsonObject *obj = json_node_get_object(root);
+    if (!json_object_has_member(obj, "format") || json_object_get_int_member(obj, "format") != 1) {
+        g_set_error(error, G_FILE_ERROR, G_FILE_ERROR_FAILED, "meta.json format must be 1");
+        g_object_unref(parser);
+        g_free(data);
+        return FALSE;
+    }
+
+    const char *html_val = NULL;
+    const char *css_val = NULL;
+    if (!meta_required_string(obj, "id", error) ||
+        !meta_required_string(obj, "name", error) ||
+        !meta_required_string(obj, "short_name", error) ||
+        !meta_required_string_array(obj, "index_languages", error) ||
+        !meta_required_string_array(obj, "content_languages", error) ||
+        !meta_required_string(obj, "version", error) ||
+        !meta_required_string(obj, "created", error) ||
+        !meta_string_member(obj, "html", &html_val, error) ||
+        !meta_string_member(obj, "stylesheet", &css_val, error)) {
+        g_object_unref(parser);
+        g_free(data);
+        return FALSE;
+    }
+
+    if (json_object_has_member(obj, "name")) {
+        g_free(d->display_name);
+        d->display_name = g_strdup(json_object_get_string_member(obj, "name"));
+    }
+    g_free(d->stylesheet);
+    d->stylesheet = g_strdup(css_val);
+
+    g_free(d->html_entry);
+    char *dir = g_path_get_dirname(json_path);
+    if (g_strcmp0(dir, ".") == 0) d->html_entry = g_strdup(html_val);
+    else                          d->html_entry = g_build_filename(dir, html_val, NULL);
+    g_free(dir);
+
         if (json_object_has_member(obj, "index_languages")) {
             JsonArray *arr = json_object_get_array_member(obj, "index_languages");
             if (json_array_get_length(arr) > 0) {
@@ -158,7 +260,6 @@ static gboolean parse_meta_json(HtmDict *d, const char *json_path, GError **erro
                 d->contents_lang = g_strdup(json_array_get_string_element(arr, 0));
             }
         }
-    }
 
     g_object_unref(parser);
     g_free(data);
@@ -234,9 +335,6 @@ static gboolean ensure_sidecar_html(HtmDict *d, const ZipEntry *he, GError **err
 /*  Meta-line parser (reads #NAME etc. from the HTML sidecar)     */
 /* ────────────────────────────────────────────────────────────── */
 
-typedef enum { S_META, S_HTML } ScanState;
-
-
 /* ────────────────────────────────────────────────────────────── */
 /*  Index builder                                                  */
 /* ────────────────────────────────────────────────────────────── */
@@ -248,6 +346,339 @@ static char *strip_html_tags(const uint8_t *html, size_t len) {
         if      (html[i] == '<') in_tag = TRUE;
         else if (html[i] == '>') in_tag = FALSE;
         else if (!in_tag)        g_string_append_c(out, (char)html[i]);
+    }
+    return g_string_free(out, FALSE);
+}
+
+static const char *ascii_strcasestr_len(const char *haystack, size_t hay_len, const char *needle) {
+    size_t needle_len = strlen(needle);
+    if (!haystack || needle_len == 0 || hay_len < needle_len) return NULL;
+    for (size_t i = 0; i <= hay_len - needle_len; i++) {
+        if (g_ascii_strncasecmp(haystack + i, needle, needle_len) == 0) {
+            return haystack + i;
+        }
+    }
+    return NULL;
+}
+
+static gboolean tag_has_entry_class(const char *tag, size_t tag_len) {
+    const char *p = tag;
+    const char *end = tag + tag_len;
+    while (p < end) {
+        const char *class_attr = ascii_strcasestr_len(p, (size_t)(end - p), "class");
+        if (!class_attr) return FALSE;
+        p = class_attr + 5;
+        while (p < end && g_ascii_isspace(*p)) p++;
+        if (p >= end || *p != '=') continue;
+        p++;
+        while (p < end && g_ascii_isspace(*p)) p++;
+        if (p >= end || (*p != '"' && *p != '\'')) continue;
+        char quote = *p++;
+        const char *value = p;
+        while (p < end && *p != quote) p++;
+        size_t value_len = (size_t)(p - value);
+        size_t i = 0;
+        while (i < value_len) {
+            while (i < value_len && g_ascii_isspace(value[i])) i++;
+            size_t start = i;
+            while (i < value_len && !g_ascii_isspace(value[i])) i++;
+            if (i > start && i - start == 5 && g_ascii_strncasecmp(value + start, "entry", 5) == 0)
+                return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+static char *html_unescape_text(const char *s) {
+    GString *out = g_string_new(NULL);
+    for (const char *p = s; p && *p; ) {
+        if (*p != '&') {
+            g_string_append_c(out, *p++);
+            continue;
+        }
+        const char *semi = strchr(p, ';');
+        if (!semi || semi - p > 16) {
+            g_string_append_c(out, *p++);
+            continue;
+        }
+        char *entity = g_strndup(p + 1, (gsize)(semi - p - 1));
+        gunichar ch = 0;
+        if (g_strcmp0(entity, "amp") == 0) ch = '&';
+        else if (g_strcmp0(entity, "lt") == 0) ch = '<';
+        else if (g_strcmp0(entity, "gt") == 0) ch = '>';
+        else if (g_strcmp0(entity, "quot") == 0) ch = '"';
+        else if (g_strcmp0(entity, "apos") == 0 || g_strcmp0(entity, "#39") == 0) ch = '\'';
+        else if (entity[0] == '#') {
+            if (entity[1] == 'x' || entity[1] == 'X')
+                ch = (gunichar)g_ascii_strtoull(entity + 2, NULL, 16);
+            else
+                ch = (gunichar)g_ascii_strtoull(entity + 1, NULL, 10);
+        }
+        if (ch) {
+            char buf[8] = {0};
+            gint n = g_unichar_to_utf8(ch, buf);
+            g_string_append_len(out, buf, n);
+            p = semi + 1;
+        } else {
+            g_string_append_len(out, p, (gssize)(semi + 1 - p));
+            p = semi + 1;
+        }
+        g_free(entity);
+    }
+    return g_string_free(out, FALSE);
+}
+
+static const char *find_entry_article_start(const char *buf, size_t size, size_t pos, const char **out_tag_end) {
+    while (pos < size) {
+        const char *p = buf + pos;
+        const char *start = ascii_strcasestr_len(p, size - pos, "<article");
+        if (!start) return NULL;
+        const char *tag_end = memchr(start, '>', size - (size_t)(start - buf));
+        if (!tag_end) return NULL;
+        if (tag_has_entry_class(start, (size_t)(tag_end + 1 - start))) {
+            if (out_tag_end) *out_tag_end = tag_end;
+            return start;
+        }
+        pos = (size_t)(tag_end + 1 - buf);
+    }
+    return NULL;
+}
+
+static char *extract_attr_value(const char *tag, size_t tag_len, const char *attr_name) {
+    const char *p = tag;
+    const char *end = tag + tag_len;
+    size_t attr_len = strlen(attr_name);
+    while (p < end) {
+        const char *found = ascii_strcasestr_len(p, (size_t)(end - p), attr_name);
+        if (!found) return NULL;
+        gboolean left_ok = found == tag || g_ascii_isspace(found[-1]) || found[-1] == '<';
+        const char *q = found + attr_len;
+        gboolean right_ok = q < end && (g_ascii_isspace(*q) || *q == '=');
+        if (!left_ok || !right_ok) {
+            p = found + attr_len;
+            continue;
+        }
+        while (q < end && g_ascii_isspace(*q)) q++;
+        if (q >= end || *q != '=') return NULL;
+        q++;
+        while (q < end && g_ascii_isspace(*q)) q++;
+        if (q >= end || (*q != '"' && *q != '\'')) return NULL;
+        char quote = *q++;
+        const char *value = q;
+        while (q < end && *q != quote) q++;
+        if (q >= end) return NULL;
+        return g_strndup(value, (gsize)(q - value));
+    }
+    return NULL;
+}
+
+static char *extract_element_visible_text(const char *html, size_t len, const char *element, size_t *io_pos) {
+    size_t pos = io_pos ? *io_pos : 0;
+    char *open_pat = g_strdup_printf("<%s", element);
+    char *close_pat = g_strdup_printf("</%s>", element);
+    const char *open = ascii_strcasestr_len(html + pos, len - pos, open_pat);
+    g_free(open_pat);
+    if (!open) {
+        g_free(close_pat);
+        return NULL;
+    }
+    const char *open_end = memchr(open, '>', len - (size_t)(open - html));
+    if (!open_end) {
+        g_free(close_pat);
+        return NULL;
+    }
+    const char *content = open_end + 1;
+    const char *close = ascii_strcasestr_len(content, len - (size_t)(content - html), close_pat);
+    g_free(close_pat);
+    if (!close) return NULL;
+
+    char *stripped = strip_html_tags((const uint8_t *)content, (size_t)(close - content));
+    char *unescaped = html_unescape_text(stripped);
+    g_free(stripped);
+    if (io_pos) *io_pos = (size_t)(close - html) + strlen(element) + 3;
+    return unescaped ? unescaped : g_strdup("");
+}
+
+static gboolean is_zero_width_format(gunichar ch) {
+    return ch == 0x200B || ch == 0x200C || ch == 0x200D || ch == 0xFEFF;
+}
+
+static char *diction_normalize_key(const char *text) {
+    if (!text) return NULL;
+    GString *tmp = g_string_new(NULL);
+    gboolean in_ws = FALSE;
+
+    for (const char *p = text; p && *p; ) {
+        gunichar ch = g_utf8_get_char_validated(p, -1);
+        if (ch == (gunichar)-1 || ch == (gunichar)-2) {
+            p++;
+            continue;
+        }
+        p = g_utf8_next_char(p);
+        if (is_zero_width_format(ch)) continue;
+        if (g_unichar_isspace(ch)) {
+            if (!in_ws && tmp->len > 0) {
+                g_string_append_c(tmp, ' ');
+                in_ws = TRUE;
+            }
+            continue;
+        }
+        in_ws = FALSE;
+        char buf[8] = {0};
+        gint n = g_unichar_to_utf8(ch, buf);
+        g_string_append_len(tmp, buf, n);
+    }
+
+    if (tmp->len > 0 && tmp->str[tmp->len - 1] == ' ')
+        g_string_truncate(tmp, tmp->len - 1);
+
+    char *nfc = g_utf8_normalize(tmp->str, -1, G_NORMALIZE_NFC);
+    g_string_free(tmp, TRUE);
+    if (!nfc) return g_strdup("");
+
+    GString *folded = g_string_new(NULL);
+    for (const char *p = nfc; *p; ) {
+        gunichar ch = g_utf8_get_char(p);
+        p = g_utf8_next_char(p);
+        ch = g_unichar_tolower(ch);
+        char buf[8] = {0};
+        gint n = g_unichar_to_utf8(ch, buf);
+        g_string_append_len(folded, buf, n);
+    }
+    g_free(nfc);
+    return g_string_free(folded, FALSE);
+}
+
+static void add_index_key(GPtrArray *tmps, GHashTable *seen, const char *raw_key, guint64 off, guint32 len) {
+    char *key = diction_normalize_key(raw_key);
+    if (!key || !*key) {
+        g_free(key);
+        return;
+    }
+
+    char *dedupe = g_strdup_printf("%s:%" G_GUINT64_FORMAT ":%u", key, off, len);
+    if (!g_hash_table_contains(seen, dedupe)) {
+        TmpEntry *e = g_new(TmpEntry, 1);
+        e->word = key;
+        e->off = off;
+        e->len = len;
+        g_ptr_array_add(tmps, e);
+        g_hash_table_add(seen, dedupe);
+    } else {
+        g_free(key);
+        g_free(dedupe);
+    }
+}
+
+static gboolean tag_name_matches(const char *tag, size_t tag_len, const char *name) {
+    size_t i = 1;
+    if (i < tag_len && tag[i] == '/') i++;
+    while (i < tag_len && g_ascii_isspace(tag[i])) i++;
+    size_t nlen = strlen(name);
+    return i + nlen <= tag_len &&
+           g_ascii_strncasecmp(tag + i, name, nlen) == 0 &&
+           (i + nlen == tag_len || g_ascii_isspace(tag[i + nlen]) || tag[i + nlen] == '>' || tag[i + nlen] == '/');
+}
+
+static gboolean attr_name_is_event(const char *name, size_t len) {
+    return len >= 2 && (name[0] == 'o' || name[0] == 'O') && (name[1] == 'n' || name[1] == 'N');
+}
+
+static gboolean attr_value_is_javascript(const char *value, size_t len) {
+    while (len > 0 && g_ascii_isspace(*value)) {
+        value++;
+        len--;
+    }
+    return len >= 11 && g_ascii_strncasecmp(value, "javascript:", 11) == 0;
+}
+
+static void append_sanitized_tag(GString *out, const char *tag, size_t tag_len) {
+    if (tag_len < 2 || tag[0] != '<') return;
+    if (tag_name_matches(tag, tag_len, "form")) {
+        if (tag_len > 1 && tag[1] == '/') g_string_append(out, "</div>");
+        else g_string_append(out, "<div");
+    } else {
+        size_t name_end = 1;
+        if (name_end < tag_len && tag[name_end] == '/') name_end++;
+        while (name_end < tag_len && !g_ascii_isspace(tag[name_end]) && tag[name_end] != '>' && tag[name_end] != '/')
+            name_end++;
+        g_string_append_len(out, tag, name_end);
+    }
+
+    size_t i = 1;
+    if (i < tag_len && tag[i] == '/') i++;
+    while (i < tag_len && !g_ascii_isspace(tag[i]) && tag[i] != '>' && tag[i] != '/') i++;
+
+    while (i < tag_len && tag[i] != '>') {
+        while (i < tag_len && g_ascii_isspace(tag[i])) i++;
+        if (i >= tag_len || tag[i] == '>' || tag[i] == '/') break;
+        size_t name_start = i;
+        while (i < tag_len && !g_ascii_isspace(tag[i]) && tag[i] != '=' && tag[i] != '>' && tag[i] != '/') i++;
+        size_t name_len = i - name_start;
+        while (i < tag_len && g_ascii_isspace(tag[i])) i++;
+        const char *value = NULL;
+        size_t value_len = 0;
+        size_t attr_end = i;
+        if (i < tag_len && tag[i] == '=') {
+            i++;
+            while (i < tag_len && g_ascii_isspace(tag[i])) i++;
+            if (i < tag_len && (tag[i] == '"' || tag[i] == '\'')) {
+                char quote = tag[i++];
+                value = tag + i;
+                while (i < tag_len && tag[i] != quote) i++;
+                value_len = (size_t)(tag + i - value);
+                if (i < tag_len) i++;
+                attr_end = i;
+            } else {
+                value = tag + i;
+                while (i < tag_len && !g_ascii_isspace(tag[i]) && tag[i] != '>') i++;
+                value_len = (size_t)(tag + i - value);
+                attr_end = i;
+            }
+        }
+
+        gboolean drop = attr_name_is_event(tag + name_start, name_len);
+        if (!drop && value &&
+            (g_ascii_strncasecmp(tag + name_start, "href", name_len) == 0 ||
+             g_ascii_strncasecmp(tag + name_start, "src", name_len) == 0 ||
+             g_ascii_strncasecmp(tag + name_start, "xlink:href", name_len) == 0)) {
+            drop = attr_value_is_javascript(value, value_len);
+        }
+        if (!drop && name_len > 0) {
+            g_string_append_c(out, ' ');
+            g_string_append_len(out, tag + name_start, attr_end - name_start);
+        }
+    }
+
+    if (tag_len >= 2 && tag[tag_len - 2] == '/') g_string_append(out, " /");
+    g_string_append_c(out, '>');
+}
+
+static char *sanitize_diction_fragment(const char *html, size_t len) {
+    GString *out = g_string_sized_new(len);
+    size_t pos = 0;
+    while (pos < len) {
+        const char *lt = memchr(html + pos, '<', len - pos);
+        if (!lt) {
+            g_string_append_len(out, html + pos, len - pos);
+            break;
+        }
+        g_string_append_len(out, html + pos, (size_t)(lt - (html + pos)));
+        const char *gt = memchr(lt, '>', len - (size_t)(lt - html));
+        if (!gt) break;
+        size_t tag_len = (size_t)(gt + 1 - lt);
+
+        if (tag_name_matches(lt, tag_len, "script") || tag_name_matches(lt, tag_len, "iframe")) {
+            const char *close = tag_name_matches(lt, tag_len, "script")
+                ? ascii_strcasestr_len(gt + 1, len - (size_t)(gt + 1 - html), "</script>")
+                : ascii_strcasestr_len(gt + 1, len - (size_t)(gt + 1 - html), "</iframe>");
+            pos = close ? (size_t)(close - html) + (tag_name_matches(lt, tag_len, "script") ? 9 : 9)
+                        : (size_t)(gt + 1 - html);
+            continue;
+        }
+
+        append_sanitized_tag(out, lt, tag_len);
+        pos = (size_t)(gt + 1 - html);
     }
     return g_string_free(out, FALSE);
 }
@@ -366,64 +797,67 @@ static void htm_resolve_links(GPtrArray *tmps, const uint8_t *buf, size_t size) 
 }
 
 static gboolean htm_build_index(HtmDict *d, const uint8_t *buf, size_t size, GError **error) {
-    ScanState  state        = S_META;
-    char      *current_word = NULL;
-    guint64    html_start   = 0;
     size_t     pos          = 0;
 
     GPtrArray *tmps = g_ptr_array_new_with_free_func(tmp_entry_free);
+    GHashTable *seen = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    const char *html = (const char *)buf;
 
     while (pos < size) {
-        const char *p = (const char *)(buf + pos);
-        size_t rem = size - pos;
+        const char *tag_end = NULL;
+        const char *start = find_entry_article_start(html, size, pos, &tag_end);
+        if (!start) break;
 
-        if (state == S_META) {
-            const char *start = memmem(p, rem, "<article", 8);
-            if (!start) break;
-            
-            const char *id_attr = memmem(start, size - (size_t)(start - (const char *)buf), "id=\"", 4);
-            if (!id_attr) {
-                pos = (size_t)(start - (const char *)buf) + 8;
-                continue;
-            }
-            id_attr += 4;
-            const char *rem_p = id_attr;
-            size_t rem_len = size - (size_t)(rem_p - (const char *)buf);
-            const char *id_end = memchr(rem_p, '"', rem_len);
-            if (!id_end) {
-                pos = (size_t)(id_attr - (const char *)buf);
-                continue;
-            }
-            
-            g_free(current_word);
-            current_word = g_strndup(id_attr, (gsize)(id_end - id_attr));
-            
-            const char *tag_end = memchr(id_end, '>', size - (size_t)(id_end - (const char *)buf));
-            if (!tag_end) {
-                pos = (size_t)(id_end - (const char *)buf);
-                continue;
-            }
-            html_start = (guint64)(start - (const char *)buf);
-            state = S_HTML;
-            pos = (size_t)(tag_end + 1 - (const char *)buf);
-        } else {
-            const char *end = memmem(p, rem, "</article>", 10);
-            if (!end) break;
-            
-            guint64 html_end = (guint64)(end + 10 - (const char *)buf);
-            
-            if (current_word) {
-                TmpEntry *e = g_new(TmpEntry, 1);
-                e->word = g_strdup(current_word);
-                e->off  = html_start;
-                e->len  = (guint32)(html_end - html_start);
-                g_ptr_array_add(tmps, e);
-            }
-            state = S_META;
-            pos = (size_t)(end + 10 - (const char *)buf);
+        const char *end = ascii_strcasestr_len(tag_end + 1, size - (size_t)(tag_end + 1 - html), "</article>");
+        if (!end) break;
+
+        guint64 html_start = (guint64)(start - html);
+        guint64 html_end = (guint64)(end + 10 - html);
+        guint32 html_len = (guint32)(html_end - html_start);
+        const char *article = start;
+        size_t article_len = (size_t)(html_end - html_start);
+
+        gboolean has_lookup_key = FALSE;
+        size_t scan = 0;
+        char *headword = extract_element_visible_text(article, article_len, "headword", &scan);
+        if (headword && *headword) {
+            add_index_key(tmps, seen, headword, html_start, html_len);
+            has_lookup_key = TRUE;
         }
+        g_free(headword);
+
+        scan = 0;
+        for (;;) {
+            char *alias = extract_element_visible_text(article, article_len, "alias", &scan);
+            if (!alias) break;
+            if (*alias) {
+                add_index_key(tmps, seen, alias, html_start, html_len);
+                has_lookup_key = TRUE;
+            }
+            g_free(alias);
+        }
+
+        scan = 0;
+        for (;;) {
+            char *infl = extract_element_visible_text(article, article_len, "inflection", &scan);
+            if (!infl) break;
+            if (*infl) {
+                add_index_key(tmps, seen, infl, html_start, html_len);
+                has_lookup_key = TRUE;
+            }
+            g_free(infl);
+        }
+
+        /* Compatibility for older generated packages that used article id as the key. */
+        if (!has_lookup_key) {
+            char *id = extract_attr_value(start, (size_t)(tag_end + 1 - start), "id");
+            if (id && *id) add_index_key(tmps, seen, id, html_start, html_len);
+            g_free(id);
+        }
+
+        pos = (size_t)(end + 10 - html);
     }
-    g_free(current_word);
+    g_hash_table_destroy(seen);
 
     if (tmps->len == 0) {
         g_ptr_array_unref(tmps);
@@ -490,6 +924,7 @@ void htm_dict_close(HtmDict *d) {
     g_free(d->display_name);
     g_free(d->index_lang);
     g_free(d->contents_lang);
+    g_free(d->root_prefix);
     g_free(d->html_entry);
     g_free(d->resource_prefix);
     g_free(d->stylesheet);
@@ -528,27 +963,25 @@ HtmDict *htm_dict_open(const char *zip_path, GError **error) {
         return NULL;
     }
 
-    /* 1. Try to find meta.json */
-    GPtrArray *names = zip_mmap_list_names(d->zip);
-    char *meta_path = NULL;
-    for (guint i = 0; names && i < names->len; i++) {
-        const char *n = g_ptr_array_index(names, i);
-        if (g_str_has_suffix(n, "meta.json")) {
-            meta_path = g_strdup(n);
-            break;
-        }
+    if (!discover_diction_root(d->zip, &d->root_prefix, error)) {
+        htm_dict_close(d);
+        return NULL;
     }
 
-    if (meta_path) {
-        if (!parse_meta_json(d, meta_path, error)) {
-            g_free(meta_path);
-            htm_dict_close(d);
-            return NULL;
-        }
+    char *meta_path = g_strconcat(d->root_prefix, "meta.json", NULL);
+    if (!zip_mmap_lookup(d->zip, meta_path)) {
+        g_set_error(error, G_FILE_ERROR, G_FILE_ERROR_FAILED, "required meta.json missing: %s", meta_path);
         g_free(meta_path);
-    } else {
-        d->html_entry = discover_html_entry(d->zip, zip_path);
+        htm_dict_close(d);
+        return NULL;
     }
+
+    if (!parse_meta_json(d, meta_path, error)) {
+        g_free(meta_path);
+        htm_dict_close(d);
+        return NULL;
+    }
+    g_free(meta_path);
 
     if (!d->html_entry) {
         g_set_error(error, G_FILE_ERROR, G_FILE_ERROR_FAILED, "no suitable .html inside zip");
@@ -565,9 +998,18 @@ HtmDict *htm_dict_open(const char *zip_path, GError **error) {
 
     d->resource_prefix = resource_prefix_from_html_entry(d->html_entry);
 
+    char *stylesheet_entry = g_strconcat(d->resource_prefix ? d->resource_prefix : "", d->stylesheet ? d->stylesheet : "", NULL);
+    if (!d->stylesheet || !*d->stylesheet || !zip_mmap_lookup(d->zip, stylesheet_entry)) {
+        g_set_error(error, G_FILE_ERROR, G_FILE_ERROR_FAILED, "stylesheet entry missing: %s", stylesheet_entry);
+        g_free(stylesheet_entry);
+        htm_dict_close(d);
+        return NULL;
+    }
+    g_free(stylesheet_entry);
+
     /* Cache paths */
     char *base      = dict_cache_path_for(zip_path);
-    d->flat_path    = g_strconcat(base, ".flat",     NULL);
+    d->flat_path    = g_strconcat(base, ".diction-v2.flat", NULL);
     d->sidecar_path = g_strconcat(base, ".html.bin", NULL);
     g_free(base);
 
@@ -589,12 +1031,14 @@ HtmDict *htm_dict_open(const char *zip_path, GError **error) {
     if (!d->contents_lang)d->contents_lang = g_strdup("Unknown");
 
 
-    /* Build flat index if not present */
-    if (!g_file_test(d->flat_path, G_FILE_TEST_EXISTS)) {
+    /* Build flat index if not present or stale. */
+    if (!dict_cache_is_valid(d->flat_path, d->zip_path)) {
         if (!htm_build_index(d, d->html_base, d->html_size, error)) {
             htm_dict_close(d);
             return NULL;
         }
+        const char *srcs[] = {d->zip_path, NULL};
+        dict_cache_sync_mtime(d->flat_path, srcs, 1);
     }
 
     /* mmap the flat cache */
@@ -618,22 +1062,29 @@ HtmDict *htm_dict_open(const char *zip_path, GError **error) {
 
 char *htm_dict_get_definition_html(HtmDict *d, const char *word) {
     if (!d || !word) return g_strdup("");
+    char *query = diction_normalize_key(word);
+    if (!query || !*query) {
+        g_free(query);
+        return g_strdup("");
+    }
 
     /* Binary search in the flat index */
     if (d->flat_index) {
-        size_t pos = flat_index_search(d->flat_index, word);
+        size_t pos = flat_index_search(d->flat_index, query);
         if (pos == (size_t)-1) {
             /* try case-insensitive prefix */
-            pos = flat_index_search_prefix(d->flat_index, word);
+            pos = flat_index_search_prefix(d->flat_index, query);
         }
         if (pos != (size_t)-1) {
             const FlatTreeEntry *e = flat_index_get(d->flat_index, pos);
             if (e && e->d_off + (guint64)e->d_len <= (guint64)d->html_size) {
-                char *frag = g_strndup((const char *)(d->html_base + e->d_off), (gsize)e->d_len);
+                char *frag = sanitize_diction_fragment((const char *)(d->html_base + e->d_off), (size_t)e->d_len);
+                g_free(query);
                 return g_strstrip(frag);
             }
         }
     }
+    g_free(query);
     return g_strdup("");
 }
 
@@ -661,6 +1112,10 @@ gboolean htm_dict_read_resource_bytes(HtmDict *d, const char *archive_relative_p
                                       GBytes **out_bytes, char **out_mime, GError **error) {
     if (!d || !archive_relative_path) {
         g_set_error(error, G_FILE_ERROR, G_FILE_ERROR_FAILED, "bad args");
+        return FALSE;
+    }
+    if (!resource_path_is_safe(archive_relative_path)) {
+        g_set_error(error, G_FILE_ERROR, G_FILE_ERROR_FAILED, "unsafe resource path: %s", archive_relative_path);
         return FALSE;
     }
     const ZipEntry *e = zip_mmap_lookup(d->zip, archive_relative_path);

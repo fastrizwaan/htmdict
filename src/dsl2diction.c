@@ -430,12 +430,10 @@ static gboolean is_headword_line(const char *line) {
 }
 
 static void write_entry_open(FILE *out, const char *headword) {
-    fputs("<article id=\"", out);
-    diction_print_html_attr(out, headword);
-    fputs("\" class=\"entry\">\n", out);
-    fputs("  <header>\n    <h1 class=\"headword\">", out);
+    fputs("<article class=\"entry\">\n", out);
+    fputs("  <headword>", out);
     diction_print_html_text(out, headword);
-    fputs("</h1>\n  </header>\n", out);
+    fputs("</headword>\n", out);
 }
 
 static void write_entry_close(FILE *out) {
